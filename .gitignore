@@ -22,3 +22,4 @@ build_backups/
 .pytest_cache/
 *.log
 _test_*/
+_wd_verify_tmp/

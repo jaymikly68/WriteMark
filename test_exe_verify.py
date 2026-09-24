@@ -141,6 +141,20 @@ def main():
         if not has_wf or not has_alias:
             ok = False
 
+    wdog = mods.get("watermark_tool.watchdog")
+    if wdog is None:
+        print("[缺失] watermark_tool.watchdog 未在归档中找到")
+        ok = False
+    else:
+        names = collect_names(wdog)
+        consts = find_str_consts(wdog)
+        # 守护修复：输出文件被整个删除时能从原文件重建（此前只抛 Package not found 永不补回）
+        has_recreate = (any("输出文件已被删除" in c for c in consts)
+                        and "exists" in names)
+        print(f"watermark_tool.watchdog: 输出文件被删除后自动重建 -> {has_recreate}")
+        if not has_recreate:
+            ok = False
+
     print("\n校验结果:", "通过 ✅" if ok else "存在问题 ❌")
     sys.exit(0 if ok else 2)
 

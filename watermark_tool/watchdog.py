@@ -46,7 +46,13 @@ class WatermarkWatchdog:
                     if was_locked:
                         self.log("· 文件已空闲，守护恢复检查。")
                     was_locked = False
-                    if not core.has_watermark(self.output_path):
+                    if not os.path.exists(self.output_path):
+                        # 输出文件被整个删除（不只是水印被删）：直接从原文件重新生成并加水印。
+                        # 此前这里会走 has_watermark 抛“Package not found”，导致只报错、永不补回。
+                        core.insert_watermark(self.src_path, self.kinds,
+                                              output_path=self.output_path, **self.opts)
+                        self.log("⚠ 输出文件已被删除，已自动从原文件重新生成并加水印。")
+                    elif not core.has_watermark(self.output_path):
                         core.insert_watermark(self.src_path, self.kinds,
                                               output_path=self.output_path, **self.opts)
                         self.log("⚠ 检测到水印被移除，已自动从原文件补回。")
