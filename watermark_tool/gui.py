@@ -48,7 +48,7 @@ class Worker(QThread):
 
 
 class FontWorker(QThread):
-    """后台线程：读取可用字体（Word COM 优先，失败回退系统字体），避免卡 UI。"""
+    """后台线程：读取可用字体（系统已安装字体优先；注册表读不到时才兜底 Word COM），避免卡 UI。"""
     finished_signal = Signal(list, str)   # (字体名列表, 来源说明)
     error_signal = Signal(str)
 
@@ -508,9 +508,14 @@ class App(QMainWindow):
             self._maybe_load_word_fonts()
 
     def _maybe_load_word_fonts(self):
-        """导入 Word 后：先征询权限，同意后后台读取 Word（或系统）字体并扩充下拉框。
+        """导入 Word 后：先征询权限，同意后后台读取 Word 里的字体并扩充下拉框。
 
         每会话仅询问一次；用户拒绝则沿用内置字体，不再打扰。
+
+        实测经验：Word 给出的字体名是**本机化**的（中文系统里是"宋体/黑体/仿宋/微软雅黑"
+        这类中文名，约 1400 条），注册表只有英文名且中文名的仅十几条——所以这里仍走
+        Word，但读取完会确保那个 Word 进程被彻底关掉（com_cleanup），不会像早先版本
+        那样在后台留下一个看不见的 Word，害得用户后来关它时以为"退出 Word 卡顿"。
         """
         if self._fonts_loaded:
             return
@@ -518,10 +523,11 @@ class App(QMainWindow):
             return
         self._fonts_asked = True
         ans = QMessageBox.question(
-            self, "读取 Word 字体",
+            self, "读取可用字体",
             "是否允许本工具读取您 Word 中可用的字体，以扩充“文本水印”的中文字体 / 西文字体选择？\n\n"
-            "说明：仅读取字体名称列表，不会访问或修改您任何文档的内容。\n"
-            "（若本机未安装 Word，将自动改用系统已安装字体作为来源。）",
+            "说明：仅读取字体名称列表，不会访问或修改您任何文档的内容；\n"
+            "读取时若需要会临时启动一个不可见的 Word，读完立即关闭"
+            "（若本机没有 Word，则改用系统已安装字体）。",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -739,26 +745,47 @@ class App(QMainWindow):
         QApplication.quit()
 
     def _ask_close_choice(self):
-        """点击标题栏关闭按钮时弹出询问。
+        """点击标题栏关闭按钮（或 Alt+F4）时弹出询问——无论守护是否开启。
 
-        返回 'minimize'（隐藏窗口、后台继续保护）/ 'quit'（退出程序）/ 'cancel'（取消）。
+        返回 'minimize'（窗口最小化到后台，进程保留）/ 'quit'（退出程序）/ 'cancel'（取消）。
+
+        自动化脚本可用环境变量 WM_CLOSE_CHOICE=minimize|quit|cancel 直接指定，
+        这样测试无需去点模态框按钮。
         """
+        forced = os.environ.get("WM_CLOSE_CHOICE", "").strip().lower()
+        if forced in ("minimize", "quit", "cancel"):
+            return forced
+
         has_tray = self.tray is not None
+        watching = self.wd is not None
         box = QMessageBox(self)
         box.setWindowTitle("关闭窗口")
         box.setIcon(QMessageBox.Question)
-        if has_tray:
-            box.setText("后台保护正在运行。要如何处理这个窗口？")
-            box.setInformativeText(
-                "【最小化到后台】窗口隐藏到系统托盘，守护继续运行，水印被删会自动补回。\n"
-                "单击/双击托盘图标可重新打开窗口，右键托盘可停止守护或退出程序。\n\n"
-                "【退出程序】停止后台保护并完全退出进程。")
+        box.setText("要关闭这个窗口，还是直接退出程序？")
+        if watching:
+            if has_tray:
+                box.setInformativeText(
+                    "后台保护正在运行。\n\n"
+                    "【最小化到后台】窗口隐藏到系统托盘，守护继续运行，水印被删会自动补回；\n"
+                    "单击/双击托盘图标可重新打开窗口，右键托盘可停止守护或退出程序。\n\n"
+                    "【退出程序】停止后台保护并完全退出进程。")
+            else:
+                box.setInformativeText(
+                    f"后台保护正在运行，但本机系统托盘不可用（{self._tray_reason or '原因未知'}）。\n\n"
+                    "【最小化到后台】窗口隐藏，进程留在后台守护，但没有托盘图标可唤回；\n"
+                    "【退出程序】停止后台保护并完全退出进程。")
         else:
-            box.setText("后台保护正在运行，但本机系统托盘不可用。")
-            box.setInformativeText(
-                f"托盘初始化失败原因：{self._tray_reason or '未知'}\n\n"
-                "【最小化到后台】窗口隐藏，进程留在后台守护（无托盘图标，重新打开需再次启动程序）。\n"
-                "【退出程序】停止后台保护并完全退出进程。")
+            if has_tray:
+                box.setInformativeText(
+                    "当前没有开启后台保护（水印被删不会自动补回）。\n\n"
+                    "【最小化到后台】窗口隐藏到系统托盘，程序继续在后台运行；\n"
+                    "单击/双击托盘图标可重新打开窗口，右键托盘可退出程序。\n\n"
+                    "【退出程序】完全退出进程。")
+            else:
+                box.setInformativeText(
+                    f"当前没有开启后台保护。本机系统托盘也不可用（{self._tray_reason or '原因未知'}）。\n\n"
+                    "【最小化到后台】窗口隐藏，进程留在后台运行，但没有托盘图标可唤回；\n"
+                    "【退出程序】完全退出进程。")
         btn_min = box.addButton("最小化到后台" if has_tray else "最小化到后台（无托盘图标）",
                                 QMessageBox.AcceptRole)
         btn_quit = box.addButton("退出程序", QMessageBox.DestructiveRole)
@@ -772,47 +799,52 @@ class App(QMainWindow):
             return "cancel"
         return "minimize"
 
+    def _go_background(self):
+        """隐藏窗口、进程留在后台（守护若在运行则继续补回水印）。"""
+        self.hide()
+        if self.wd is not None:
+            tip = ("守护已在后台继续运行，水印被删会自动补回。\n"
+                   "单击/双击托盘图标可重新打开窗口，右键托盘可停止守护 / 退出程序。")
+        else:
+            tip = ("程序已在后台运行（未开启后台保护）。\n"
+                   "单击/双击托盘图标可重新打开窗口，右键托盘可退出程序。")
+        shown = False
+        try:
+            if self.tray is not None:
+                self.tray.showMessage("Word 一键水印工具", tip,
+                                      QSystemTrayIcon.Information, 4000)
+                shown = True
+        except Exception:
+            pass
+        if shown:
+            self._append_log("已最小化到系统托盘，程序继续在后台运行。")
+        else:
+            self._append_log("窗口已隐藏，进程仍在后台运行"
+                             "（本机托盘不可用，重新打开界面需再次启动程序）。")
+
     def closeEvent(self, event):
         """关闭窗口时清理后台线程，避免进程无法退出（表现为关闭后卡顿/驻留）。
 
         要点：
-        - 守护运行时：先弹询问（最小化到托盘继续保护 / 退出程序 / 取消），
-          选择“最小化”则隐藏窗口，守护继续后台运行，
-          这样“水印被删自动补回”不再依赖主窗口一直开着。
+        - **无论守护是否运行**都先弹询问：最小化到后台 / 退出程序 / 取消。
+          这样“点关闭到底会怎样”永远是用户自己决定的，不会突然消失。
         - 真正退出时：守护线程已是 daemon，只发停止信号、绝不阻塞等待。
-        - 兜底：启动一个计时线程，1.2s 后若进程仍未自行退出，强制 os._exit(0)。
+        - 兜底：启动一个计时线程，超时（6s）后若进程仍未自行退出，强制 os._exit(0)。
         - 工作/字体线程若超时仍未结束则强制 terminate。
         """
-        # 守护运行中：先问用户要不要留后台继续保护
-        if self.wd is not None and not self._quitting:
+        # 一律先问：最小化到后台，还是直接退出程序
+        if not self._quitting:
             if getattr(self, "_confirm_close", True) and self.isVisible():
                 choice = self._ask_close_choice()
-            elif self._quitting:
+            else:
                 # 自动化脚本 / 托盘“退出程序”已明确表达要退出，无需再问
                 choice = "quit"
-            else:
-                choice = "minimize"
             if choice == "cancel":
                 event.ignore()
                 return
             if choice == "minimize":
                 event.ignore()
-                self.hide()
-                tip = ("守护已在后台继续运行，水印被删会自动补回。\n"
-                       "单击/双击托盘图标可重新打开窗口，右键托盘可停止守护 / 退出程序。")
-                shown = False
-                try:
-                    if self.tray is not None:
-                        self.tray.showMessage("Word 一键水印工具", tip,
-                                              QSystemTrayIcon.Information, 4000)
-                        shown = True
-                except Exception:
-                    pass
-                if shown:
-                    self._append_log("已最小化到系统托盘，守护继续在后台运行。")
-                else:
-                    self._append_log("窗口已隐藏，进程仍在后台守护（本机托盘不可用，"
-                                     "重新打开界面需再次启动程序）。")
+                self._go_background()
                 return
 
         # 兜底：无论后续清理是否卡住，超时(6s)后强制结束进程。

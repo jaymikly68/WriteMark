@@ -35,11 +35,27 @@ def _rgb(rgb_tuple):
 
 
 def _word_app():
+    """启动一个不可见的 Word。返回 (word, 调用前的 WINWORD 进程快照)。
+
+    快照用于收尾时区分“我们自己起的 Word”和用户自己打开的那些，
+    避免为了清理残留而误杀用户的 Word。
+    """
     import win32com.client
+    from . import com_cleanup
+    before = com_cleanup.winword_pids()
     word = win32com.client.Dispatch("Word.Application")
     word.Visible = False
     word.DisplayAlerts = False
-    return word
+    return word, before
+
+
+def _close_word(word, before):
+    """退出 Word 并确保进程真的消失（否则会留下看不见的 Word 拖慢系统）。
+
+    处理较大文档时 Word 收尾会慢一些，所以给足 5 秒自行退出，仍不退才强制结束。
+    """
+    from . import com_cleanup
+    return com_cleanup.quit_word(word, before_pids=before, grace=5.0)
 
 
 def _header_indices(doc, sec):
@@ -261,7 +277,7 @@ def insert_watermark(path: str, kinds, output_path: str = None, **opts) -> dict:
 
     idx = 0        # 伪装显示名序号
     inserted = 0
-    word = _word_app()
+    word, _before = _word_app()
     doc = None
     try:
         doc = word.Documents.Open(path, False, False)
@@ -323,16 +339,13 @@ def insert_watermark(path: str, kinds, output_path: str = None, **opts) -> dict:
                 doc.Close(False)
             except Exception:
                 pass
-        try:
-            word.Quit()
-        except Exception:
-            pass
+        _close_word(word, _before)
 
 
 def clear_watermark(path: str, output_path: str = None) -> dict:
     import win32com.client
     path = os.path.abspath(path)
-    word = _word_app()
+    word, _before = _word_app()
     doc = None
     try:
         doc = word.Documents.Open(path, False, False)
@@ -351,16 +364,13 @@ def clear_watermark(path: str, output_path: str = None) -> dict:
                 doc.Close(False)
             except Exception:
                 pass
-        try:
-            word.Quit()
-        except Exception:
-            pass
+        _close_word(word, _before)
 
 
 def count_watermarks(path: str) -> int:
     """返回本工具水印形状的份数（守护按“份数”判断是否被删过）。"""
     path = os.path.abspath(path)
-    word = _word_app()
+    word, _before = _word_app()
     doc = None
     try:
         doc = word.Documents.Open(path, False, True)  # 只读
@@ -371,16 +381,13 @@ def count_watermarks(path: str) -> int:
                 doc.Close(False)
             except Exception:
                 pass
-        try:
-            word.Quit()
-        except Exception:
-            pass
+        _close_word(word, _before)
 
 
 def has_watermark(path: str) -> bool:
     import win32com.client
     path = os.path.abspath(path)
-    word = _word_app()
+    word, _before = _word_app()
     doc = None
     try:
         doc = word.Documents.Open(path, False, True)  # 只读
@@ -394,7 +401,4 @@ def has_watermark(path: str) -> bool:
                 doc.Close(False)
             except Exception:
                 pass
-        try:
-            word.Quit()
-        except Exception:
-            pass
+        _close_word(word, _before)

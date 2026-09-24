@@ -1,8 +1,10 @@
 """构建最终交付的单文件 WordWatermark.exe（启动器版）。
 
 流程：
-    1) 把 dist/WriteMarkApp（onedir 运行体）压缩为 payload/app_payload.zip
-    2) 用 PyInstaller 把 launcher.py + 该 zip 打成单个 exe：dist/WordWatermark.exe
+    0) 把上一次的 onedir 目录改名挪走（关键！见 prepare_app_dir 的说明）
+    1) PyInstaller 用 WordWatermark_app.spec 生成全新的 dist/WriteMarkApp
+    2) 校验运行体确实比源码新（防止“静默沿用旧产物”）
+    3) 压缩为 payload/app_payload.zip 并追加到启动器 exe 尾部 → dist/WordWatermark.exe
 
 产出：用户双击一个 exe 即可；首次运行把运行体解压到 %LOCALAPPDATA%，
 之后直接运行；关闭时无需清理临时目录，进程立即退出。
@@ -19,12 +21,56 @@ HERE = Path(__file__).resolve().parent
 APP_DIR = HERE / "dist" / "WriteMarkApp"
 PAYLOAD_DIR = HERE / "payload"
 PAYLOAD_ZIP = PAYLOAD_DIR / "app_payload.zip"
+PAYLOAD_MARKER = b"\n#WRITEMARK-PAYLOAD#\n"
+
+
+def _read_tail_marker(path):
+    with open(path, "rb") as f:
+        f.seek(-len(PAYLOAD_MARKER), os.SEEK_END)
+        return f.read() == PAYLOAD_MARKER
+
+
+def prepare_app_dir():
+    """把旧的 onedir 目录改名挪走，让 PyInstaller 每轮都从零创建。
+
+    为什么必须这么做：PyInstaller 重建时会先 `Removing dir dist/WriteMarkApp`；
+    如果这次删除被安全策略拦下（沙箱/杀软/权限都可能），它不会报错，而是继续
+    “构建完成”，产物却**静默停留在旧版本**——本项目真实踩过一次，导致测试全绿
+    但跑的还是旧程序。改名不涉及批量删除，必然成功。
+    """
+    if not APP_DIR.exists():
+        return
+    prev = APP_DIR.with_name(APP_DIR.name + ".prev")
+    if prev.exists():
+        shutil.rmtree(prev, ignore_errors=True)
+    if prev.exists():                       # 删不掉就换个名字，至少不覆盖
+        prev = APP_DIR.with_name(f"{APP_DIR.name}.prev{int(time.time())}")
+    os.replace(APP_DIR, prev)
+    print(f"已把上一次的运行体改名为 {prev.name}（确保本轮全新构建）")
+
+
+def newest_source_mtime():
+    files = list((HERE / "watermark_tool").rglob("*.py")) + [HERE / "main.py"]
+    return max(f.stat().st_mtime for f in files if f.exists())
+
+
+def check_freshness():
+    exe = APP_DIR / "WriteMarkApp.exe"
+    if not exe.exists():
+        sys.exit(f"构建失败：没有生成 {exe}")
+    # 允许 2 秒的时钟/写盘误差
+    if exe.stat().st_mtime < newest_source_mtime() - 2:
+        sys.exit("构建异常：运行体比源码还旧，说明本轮没有真正重写。\n"
+                 f"  exe : {time.ctime(exe.stat().st_mtime)}\n"
+                 f"  源码: {time.ctime(newest_source_mtime())}\n"
+                 "请检查是否有删除被安全策略拦截，或先删除 dist/WriteMarkApp 再重试。")
+    print(f"运行体已更新：{time.ctime(exe.stat().st_mtime)}")
 
 
 def build_payload():
     if not APP_DIR.is_dir():
-        sys.exit(f"找不到 onedir 运行体：{APP_DIR}\n请先执行："
-                 f"python -m PyInstaller WordWatermark_app.spec --noconfirm")
+        sys.exit(f"找不到 onedir 运行体：{APP_DIR}")
+    check_freshness()
     PAYLOAD_DIR.mkdir(exist_ok=True)
     if PAYLOAD_ZIP.exists():
         PAYLOAD_ZIP.unlink()
@@ -41,15 +87,6 @@ def build_payload():
     print(f"payload 完成：{size_mb:.1f} MB")
 
 
-PAYLOAD_MARKER = b"\n#WRITEMARK-PAYLOAD#\n"
-
-
-def _read_tail_marker(path):
-    with open(path, "rb") as f:
-        f.seek(-len(PAYLOAD_MARKER), os.SEEK_END)
-        return f.read() == PAYLOAD_MARKER
-
-
 def build_launcher():
     """先把 launcher.py 打成极小的 onefile exe，再把 zip 追加到它尾部。
 
@@ -58,17 +95,23 @@ def build_launcher():
     压缩包展开到临时目录，退出时也就没有任何大目录要删除。
     """
     t0 = time.time()
+    launcher_exe = HERE / "dist" / "WordWatermark.exe"
+    if launcher_exe.exists() and _read_tail_marker(launcher_exe):
+        # 上一轮产物尾部已挂 payload：PyInstaller 会整个重写它，直接删更干净
+        try:
+            os.remove(launcher_exe)
+        except OSError:
+            pass
     r = subprocess.run([sys.executable, "-m", "PyInstaller", "launcher.spec",
                         "--noconfirm"], cwd=str(HERE))
     if r.returncode != 0:
         sys.exit("PyInstaller 构建失败")
 
-    exe = HERE / "dist" / "WordWatermark.exe"
+    exe = launcher_exe
     if not exe.exists():
         sys.exit(f"未生成 {exe}")
     if _read_tail_marker(exe):
-        sys.exit("exe 尾部已存在 payload，请重新构建一个干净的启动器 "
-                 "（PyInstaller launcher.spec --noconfirm --clean）")
+        sys.exit("exe 尾部已存在 payload，请重新构建一个干净的启动器")
 
     with open(exe, "ab") as fexe, open(PAYLOAD_ZIP, "rb") as fzip:
         exe_size = exe.stat().st_size
@@ -83,8 +126,7 @@ def build_launcher():
     try:
         with zipfile.ZipFile(str(exe)) as z:
             names = z.namelist()
-        need = "WriteMarkApp.exe" in " | ".join(names[:20]) or any(
-            n.endswith("WriteMarkApp.exe") for n in names)
+        need = any(n.endswith("WriteMarkApp.exe") for n in names)
         print(f"自检：zipfile 可直接读取该 exe，条目 {len(names)} 个，含主程序 -> {need}")
         if not need:
             sys.exit("payload 结构异常：找不到 WriteMarkApp.exe")
@@ -92,6 +134,17 @@ def build_launcher():
         sys.exit(f"payload 自检失败：{e}")
 
 
-if __name__ == "__main__":
+def main():
+    if "--skip-app" not in sys.argv:
+        prepare_app_dir()
+        r = subprocess.run([sys.executable, "-m", "PyInstaller",
+                            "WordWatermark_app.spec", "--noconfirm", "--clean"],
+                           cwd=str(HERE))
+        if r.returncode != 0:
+            sys.exit("运行体构建失败")
     build_payload()
     build_launcher()
+
+
+if __name__ == "__main__":
+    main()

@@ -75,6 +75,52 @@ def test_cancel(app):
     print("[2] PASS")
 
 
+def test_ask_even_without_watchdog(app):
+    """不开守护时点关闭也必须弹询问（用户明确要求）。"""
+    w = App()
+    w.show()
+    w.wd = None
+    called = {"v": False}
+
+    def _fake():
+        called["v"] = True
+        return "cancel"
+    w._ask_close_choice = _fake
+    ev = QCloseEvent()
+    w.closeEvent(ev)
+    print(f"[3] 未开守护也弹询问={called['v']} (应 True)")
+    assert called["v"], "未开启守护时也必须弹窗询问"
+    assert w.isVisible(), "选了取消应保持窗口"
+    print("[3] PASS")
+
+
+def test_minimize_without_watchdog(app):
+    """未开守护时选“最小化到后台”应隐藏窗口且不退出进程。"""
+    w = App()
+    w.show()
+    w.wd = None
+    w._ask_close_choice = lambda: "minimize"
+    ev = QCloseEvent()
+    w.closeEvent(ev)
+    print(f"[4] 未开守护选最小化：窗口隐藏={w.isHidden()}，事件被忽略={not ev.isAccepted()}")
+    assert w.isHidden() and not ev.isAccepted()
+    print("[4] PASS")
+
+
+def test_env_override(app):
+    """WM_CLOSE_CHOICE 环境变量可替代模态框（供自动化使用）。"""
+    os.environ["WM_CLOSE_CHOICE"] = "quit"
+    try:
+        w = App()
+        w.show()
+        assert w._ask_close_choice() == "quit"
+        os.environ["WM_CLOSE_CHOICE"] = "minimize"
+        assert w._ask_close_choice() == "minimize"
+    finally:
+        os.environ.pop("WM_CLOSE_CHOICE", None)
+    print("[5] PASS：WM_CLOSE_CHOICE 可指定选择，自动化无需点模态框")
+
+
 def test_quit(app):
     w = App()
     w.show()
@@ -84,14 +130,14 @@ def test_quit(app):
     t0 = time.time()
     w.closeEvent(ev)
     dt = time.time() - t0
-    print(f"[3] 选“退出程序”: 耗时={dt*1000:.1f} ms (应 < 200ms)")
+    print(f"[6] 选“退出程序”: 耗时={dt*1000:.1f} ms (应 < 200ms)")
     assert dt < 0.5, "退出路径阻塞过久"
     assert wd._stop.is_set(), "守护停止信号未置位"
     time.sleep(0.3)
-    print(f"[3] 守护线程已退出={not wd._thread.is_alive()} (应 True)")
+    print(f"[6] 守护线程已退出={not wd._thread.is_alive()} (应 True)")
     assert not wd._thread.is_alive()
     shutil.rmtree(d, ignore_errors=True)
-    print("[3] PASS")
+    print("[6] PASS")
 
 
 def test_auto_script_no_modal(app):
@@ -109,28 +155,31 @@ def test_auto_script_no_modal(app):
     w._confirm_close = False
     w._quitting = True          # 明确退出
     w.closeEvent(QCloseEvent())
-    print(f"[4] _confirm_close=False 时未弹窗={not called['v']}")
+    print(f"[7] _confirm_close=False 时未弹窗={not called['v']}")
     assert not called["v"]
     w.wd = None
     wd.stop()
     shutil.rmtree(d, ignore_errors=True)
-    print("[4] PASS")
+    print("[7] PASS")
 
 
 def test_quit_on_last_window_closed_disabled():
     src = inspect.getsource(App.__module__ and __import__("watermark_tool.gui", fromlist=["main"]))
     ok = "setQuitOnLastWindowClosed(False)" in src and "QApplication.quit()" in src
-    print(f"[5] main() 已禁用 quitOnLastWindowClosed 且显式 quit: {ok}")
+    print(f"[8] main() 已禁用 quitOnLastWindowClosed 且显式 quit: {ok}")
     assert ok, "不禁用会导致隐藏窗口被当成关闭而退出整个进程"
-    print("[5] PASS")
+    print("[8] PASS")
 
 
 if __name__ == "__main__":
     app = QApplication([])
     test_minimize(app)
     test_cancel(app)
+    test_ask_even_without_watchdog(app)
+    test_minimize_without_watchdog(app)
+    test_env_override(app)
     test_quit(app)
     test_auto_script_no_modal(app)
     test_quit_on_last_window_closed_disabled()
     app.quit()
-    print("\nALL PASS：关闭按钮行为（最小化 / 退出 / 取消）符合预期")
+    print("\nALL PASS：关闭按钮行为（最小化 / 退出 / 取消，开或不开守护）符合预期")

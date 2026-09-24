@@ -209,22 +209,45 @@ def main():
         if not has_recreate or not has_count_check:
             ok = False
 
-    # 本次更新：点关闭按钮不再“直接干掉进程”，而是弹选择；
-    # 并且 main() 关掉 quitOnLastWindowClosed + 显式 quit，避免隐藏窗口被当成退出。
+    # 关闭流程（v1.1.2）：
+    # - 无论守护是否运行都要弹询问，所以必须存在“要关闭这个窗口”这句提示与
+    #   _go_background（隐藏窗口保留进程）分支；
+    # - main() 关掉 quitOnLastWindowClosed + 显式 quit，避免隐藏窗口被当成退出；
+    # - 托盘初始化失败不再静默吞掉（此前会导致“开了守护点关闭却整个进程退出”）。
     names_gui = collect_names(gui) if gui is not None else set()
     consts_gui = find_str_consts(gui) if gui is not None else []
-    has_ask = ("_ask_close_choice" in names_gui
-               and any("最小化到后台" in c for c in consts_gui)
-               and any("关闭窗口" in c for c in consts_gui))
+    has_ask_always = ("_ask_close_choice" in names_gui and "_go_background" in names_gui
+                      and any("要关闭这个窗口，还是直接退出程序" in c for c in consts_gui)
+                      and any("最小化到后台" in c for c in consts_gui))
+    has_env_override = any("WM_CLOSE_CHOICE" in c for c in consts_gui)
     # co_names 里是属性名，"(False)" 参数不会作为字符串常量出现
     has_no_autoclose = "setQuitOnLastWindowClosed" in names_gui
-    # 托盘初始化失败不再静默吞掉（此前会导致“开了守护点关闭却整个进程退出”）
     has_tray_debug = ("_tray_reason" in names_gui and "_tray_tried" in names_gui)
-    print(f"watermark_tool.gui: 关闭时弹选择(最小化/退出/取消) -> {has_ask}; "
+    print(f"watermark_tool.gui: 关闭一律弹询问(含未开守护) -> {has_ask_always}; "
+          f"WM_CLOSE_CHOICE 自动化开关 -> {has_env_override}; "
           f"main() 禁用 quitOnLastWindowClosed -> {has_no_autoclose}; "
           f"托盘失败原因可见(_tray_reason) -> {has_tray_debug}")
-    if not (has_ask and has_no_autoclose and has_tray_debug):
+    if not (has_ask_always and has_env_override and has_no_autoclose and has_tray_debug):
         ok = False
+
+    # 幽灵 Word 修复（v1.1.2）：收尾模块必须一起打进去，且字体来源要过滤 @ 竖排变体
+    cc = mods.get("watermark_tool.com_cleanup")
+    if cc is None:
+        print("[缺失] watermark_tool.com_cleanup 未在归档中找到（幽灵 Word 收尾逻辑）")
+        ok = False
+    else:
+        cc_names = collect_names(cc)
+        has_cleanup = {"winword_pids", "quit_word", "kill_pids"} <= cc_names
+        print(f"watermark_tool.com_cleanup: 含 winword_pids/quit_word/kill_pids -> {has_cleanup}")
+        if not has_cleanup:
+            ok = False
+
+    if wf is not None:
+        wf_names = collect_names(wf)
+        has_com_cleanup_ref = "com_cleanup" in wf_names
+        print(f"watermark_tool.word_fonts: 引用 com_cleanup 收尾 Word -> {has_com_cleanup_ref}")
+        if not has_com_cleanup_ref:
+            ok = False
 
     if len(sys.argv) <= 1:
         # 未指定参数时，连同启动器一起校验

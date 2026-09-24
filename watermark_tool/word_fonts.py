@@ -189,12 +189,20 @@ def get_word_fonts() -> list[str] | None:
 
     返回字体名列表；若 Word 不可用 / COM 调用失败，返回 None（调用方应回退到
     系统字体）。本函数不打开、不读取、不修改用户的任何文档内容，仅取字体名列表。
+
+    ⚠ 注意：这条路径需要临时启动一个 Word 实例。**默认不再走它**（见 collect_fonts），
+    因为它会留下“幽灵 Word”——用户后来去关那个看不见的 Word 时就会觉得“退出 Word 卡顿”。
+    这里保留它仅作为注册表读取失败时的兜底，并且会用 com_cleanup 确认 Word 真的退出。
     """
     try:
         import pythoncom
         import win32com.client
     except Exception:
         return None
+
+    from . import com_cleanup
+
+    before = com_cleanup.winword_pids()
 
     # 在工作线程里也要先初始化 COM 单元（主线程通常已由 Qt 初始化过）
     try:
@@ -220,8 +228,16 @@ def get_word_fonts() -> list[str] | None:
         return None
     finally:
         if word is not None and created:
+            # 只收拾我们自己起的那个 Word；退出不干净时强制结束
+            com_cleanup.quit_word(word, before_pids=before)
+        else:
             try:
-                word.Quit()
+                del word
+            except Exception:
+                pass
+            try:
+                import gc
+                gc.collect()
             except Exception:
                 pass
         try:
@@ -233,11 +249,25 @@ def get_word_fonts() -> list[str] | None:
 def collect_fonts() -> tuple[list[str], str]:
     """获取可用于下拉框的字体列表，并返回来源说明。
 
-    优先 Word COM；不可用时回退系统注册表字体。返回 (字体名列表, 来源字符串)。
+    来源优先级：**Word COM（本机化名称、最全）→ 系统已安装字体（注册表）**。
+
+    为什么仍以 Word 为主：Word 的字体名是**本机化**的（中文系统上给出"宋体 / 黑体 /
+    微软雅黑 / 仿宋"，数量约 1400 条），而注册表里这些只以 "SimSun / SimHei /
+    Microsoft YaHei" 之类的英文名出现（中文名只有 14 条），用户按中文名找字体会很别扭。
+
+    代价是要临时起一个 Word——早先版本正因为没收拾干净而留下"幽灵 Word"，
+    导致用户后来关它时觉得"退出 Word 卡顿"。现在收尾统一走 com_cleanup：
+    先 Quit、再释放引用、仍不退就只强制结束我们自己起的那一个进程（不动用户的 Word）。
+
+    另外过滤掉以 `@` 开头的竖排字体变体（"@宋体" 之类），它们只是同一字体的竖排形式，
+    对本工具的水印渲染没有意义，留着只会让下拉框里出现一堆重复项。
     """
     fonts = get_word_fonts()
     if fonts:
-        return fonts, "Word"
+        cleaned = [f for f in fonts if f and not f.startswith("@")]
+        if cleaned:
+            return cleaned, "Word"
+
     sys_fonts = list_system_fonts()
     if sys_fonts:
         return sys_fonts, "系统字体"
