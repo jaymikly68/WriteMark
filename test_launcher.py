@@ -20,7 +20,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 TITLE = "Word 一键水印工具"
 APP_EXE_NAME = "WriteMarkApp.exe"
-VERSION = "1.1.3"
+VERSION = "1.1.5"
 
 
 def runtime_root():
@@ -169,6 +169,14 @@ def main():
 
     runtime_path = os.path.join(runtime_root(), VERSION, APP_EXE_NAME)
     print(f"\nruntime 已就绪：{os.path.isfile(runtime_path)} -> {runtime_path}")
+
+    # ---- 陈旧运行时必须自动重建（回归）----
+    # 曾踩过：runtime 目录按版本号命名，版本号不变就永不重新解压，
+    # 结果发布的新 exe 一直在跑旧代码，用户反馈"程序打不开"却查不到原因。
+    rstamp = os.path.join(runtime_root(), VERSION, "payload.stamp")
+    ok_stamp = os.path.isfile(rstamp) and open(rstamp, encoding="utf-8").read().strip() != ""
+    print(f"payload 指纹文件已写入并非空：{ok_stamp}")
+    assert ok_stamp, "runtime 目录里没有 payload 指纹 —— 以后发新版会继续跑旧代码"
     if os.path.isdir(runtime_root()):
         size = sum(os.path.getsize(os.path.join(d, f))
                    for d, _, fs in os.walk(runtime_root()) for f in fs)

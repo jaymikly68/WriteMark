@@ -14,6 +14,7 @@ PySide6 (Qt) 一键 GUI：选择 Word 文件 → 设置文本/图像水印 → �
 from __future__ import annotations
 
 import os
+import sys
 import threading
 
 from PySide6.QtWidgets import (
@@ -26,6 +27,10 @@ from PySide6.QtCore import Qt, QThread, Signal, QTimer, QStringListModel
 from PySide6.QtGui import QColor, QImage, QPixmap
 
 from . import core, watchdog, preview, word_fonts
+try:  # office_tweak 只依赖标准库，任何情况下缺了也不该拖垮整GUI
+    from . import office_tweak as otw
+except Exception:  # pragma: no cover
+    otw = None
 
 
 class Worker(QThread):
@@ -45,6 +50,33 @@ class Worker(QThread):
         except Exception as e:
             self.log_signal.emit(f"操作失败：{e}")
             self.result_signal.emit(False, str(e))
+
+
+class OfficeWorker(QThread):
+    """后台执行 Office 注册表操作 / 退出测速，避免 20 秒的 bench 卡死 UI。
+
+    fn 的返回值可以是 dict（修复/还原结果）也可以是 (秒数, 说明)（测速）。
+    """
+    result_signal = Signal(bool, str, bool)   # (ok, msg, need_admin)
+
+    def __init__(self, fn):
+        super().__init__()
+        self.fn = fn
+
+    def run(self):
+        try:
+            r = self.fn()
+            if isinstance(r, dict):
+                self.result_signal.emit(bool(r["ok"]), r["msg"], bool(r.get("need_admin")))
+            elif r is None:
+                self.result_signal.emit(False, "这次没测出结果", False)
+            else:
+                dt, note = r
+                self.result_signal.emit(True,
+                                        "关闭耗时 %.2f 秒\n%s" % (dt, note) if dt is not None else note,
+                                        False)
+        except Exception as e:
+            self.result_signal.emit(False, str(e), False)
 
 
 class FontWorker(QThread):
@@ -348,6 +380,35 @@ class App(QMainWindow):
         vw.addLayout(row)
         root.addWidget(f_watch)
 
+        # ---------------- Word 秒退（关闭卡顿） ----------------
+        f_exit = self._make_group("Word 秒退（修复关闭 Word 时的十几秒卡顿）")
+        vex = f_exit.layout()
+        self._exit_info = QLabel("未检测")
+        self._exit_info.setWordWrap(True)
+        self._exit_info.setStyleSheet("color:#444;")
+        vex.addWidget(self._exit_info)
+        hex_ = QHBoxLayout()
+        b = QPushButton("诊断"); b.clicked.connect(self._office_diagnose); hex_.addWidget(b)
+        self._btn_fix = QPushButton("一键修复"); self._btn_fix.clicked.connect(self._office_fix); hex_.addWidget(self._btn_fix)
+        b = QPushButton("测速"); b.clicked.connect(self._office_bench); hex_.addWidget(b)
+        self._btn_revert = QPushButton("还原"); self._btn_revert.clicked.connect(self._office_revert); hex_.addWidget(self._btn_revert)
+        vex.addLayout(hex_)
+        # 可选加码默认不写：这些项会改变 Office 联网行为，甚至把已登录的账号踢下线，
+        # 必须由用户显式确认后才会动，不能混进「一键修复」
+        hopt = QHBoxLayout()
+        b = QPushButton("可选加码（会踢账号，慎用）")
+        b.setStyleSheet("color:#b00;")
+        b.clicked.connect(self._office_optional); hopt.addWidget(b)
+        lbl = QLabel("「一键修复」只禁加载项 + 关遥测，不动登录状态")
+        lbl.setStyleSheet("color:#666;")
+        hopt.addWidget(lbl, 1)
+        vex.addLayout(hopt)
+        self._exit_detail = QTextEdit(); self._exit_detail.setReadOnly(True)
+        self._exit_detail.setFixedHeight(66)
+        self._exit_detail.setPlaceholderText("诊断 / 修复 / 测速结果会显示在这里")
+        vex.addWidget(self._exit_detail)
+        root.addWidget(f_exit)
+
         # 日志
         f_log = self._make_group("日志")
         vl = f_log.layout()
@@ -389,6 +450,166 @@ class App(QMainWindow):
 
     def _schedule_preview(self, *args):
         self._preview_timer.start()
+
+    # ------------------------------------------------ Word 秒退
+    def _office_start(self, worker):
+        self._office_worker = worker          # 持有引用，防止线程被 GC 后 abort
+        worker.result_signal.connect(self._office_done)
+        for b in (getattr(self, "_btn_fix", None), getattr(self, "_btn_revert", None)):
+            if b:
+                b.setEnabled(False)
+        self.status_label.setText("处理中…")
+        worker.start()
+
+    def _office_done(self, ok, msg, need_admin=False):
+        for b in (getattr(self, "_btn_fix", None), getattr(self, "_btn_revert", None)):
+            if b:
+                b.setEnabled(True)
+        self.status_label.setText("就绪")
+        self._exit_detail.append(msg)
+        self._office_refresh_info()
+        if need_admin and not otw.is_admin():
+            ask = QMessageBox.question(
+                self, "需要管理员权限",
+                "有「组策略」级别的开关被系统 ACL 拒绝写入（用户级设置已生效，不影响修复效果）。\n\n"
+                "要不要现在触发一次 UAC 提权，把其余项也写进去？\n"
+                "（会弹出 Windows 的「是否允许此应用对你的设备进行更改」窗口，请点「是」）",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+            if ask == QMessageBox.Yes:
+                self._office_elevate()
+
+    def _office_elevate(self):
+        """拉起一个提权的自己去执行修复，然后轮询它的结果文件。"""
+        launched, code = otw.elevate("office-fix")
+        if not launched:
+            QMessageBox.warning(self, "提权失败",
+                                "未能启动提权进程（UAC 被拒绝或环境不允许）。\n"
+                                "可改用：右键本程序 →「以管理员身份运行」，再点一次「一键修复」。")
+            return
+        self.status_label.setText("等待管理员操作…")
+
+        def poll():
+            res = otw.read_result()
+            if res is None:                     # 提权进程还在跑
+                return True                     # 继续等
+            ok, msg = res
+            self._office_done(ok, "【管理员权限执行】\n" + msg, False)
+            return False                        # 停掉定时器
+        t = QTimer(self)
+        t.setInterval(400)
+        t.timeout.connect(poll)
+        t.start(400)
+        self._elevate_timer = t
+
+    def _office_refresh_info(self):
+        if otw is None:
+            self._exit_info.setText("诊断模块不可用")
+            return
+        try:
+            d = otw.diagnose()
+        except Exception as e:
+            self._exit_info.setText("诊断失败：%s" % e)
+            return
+        bits = ["Office %s" % d["version"],
+                "已登录账户" if d["logged_in"] else "未登录账户",
+                "免管理员项 %d/%d" % (d["applied_user"], d["total_user"])]
+        if not d["policy_writable"]:
+            bits.append("组策略被锁（需管理员）")
+        bits.append("管理员权限：是" if d["admin"] else "管理员权限：否")
+        self._exit_info.setText("  ·  ".join(bits))
+
+    def _office_diagnose(self):
+        if otw is None:
+            return
+        def job():
+            d = otw.diagnose()
+            L = ["Office 版本分支：%s" % d["version"],
+                 "登录状态：%s" % ("已登录微软账户 %s…（已排除：实测改它无效，"
+                                  "18s 依旧，真凶是加载项）" % d["account"]
+                                  if d["logged_in"] else "未发现登录标记"),
+                 "管理员权限：%s" % ("有" if d["admin"] else "无"),
+                 "组策略分支：%s" % ("可写" if d["policy_writable"] else "被系统 ACL 锁住，写入需管理员"),
+                 "",
+                 "【加载项】实测卡顿的真正元凶就在这里"]
+            for name, lb, desc, auto in d["addins"]:
+                L.append("  %-38s LoadBehavior=%-2s %s —— %s"
+                         % (name, lb, "随 Word 启动自动加载" if auto else "不自动加载", desc))
+            L.append("")
+            L.append("【用户级开关】免管理员，修复主力")
+            for it in d["items"]:
+                if it["realm"] != "user":
+                    continue
+                cur = "未设置" if it["current"] == otw.MISSING else repr(it["current"])
+                L.append("  %-38s %-22s → %-3r  %s" % (it["name"], cur, it["want"], it["desc"]))
+            L.append("")
+            L.append("【可选加码】默认不动，需手动勾选才会写")
+            for path, name, want, desc in otw.optional_items(d["version"]):
+                cur = "未设置" if otw.read_val(path, name) == otw.MISSING else repr(otw.read_val(path, name))
+                L.append("  %-38s %-22s %s" % (name, cur, desc))
+            L.append("")
+            L.append("【组策略开关】可选加码")
+            for it in d["items"]:
+                if it["realm"] != "policy":
+                    continue
+                cur = "未设置" if it["current"] == otw.MISSING else repr(it["current"])
+                L.append("  %-38s %-22s → %-3r" % (it["name"], cur, it["want"]))
+            return {"ok": True, "msg": "\n".join(L), "need_admin": not d["policy_writable"]}
+        self._office_start(OfficeWorker(job))
+
+    def _office_fix(self):
+        if otw is None:
+            return
+        warn = QMessageBox.question(
+            self, "一键修复",
+            "卡顿的真正原因是 Word 的 COM 加载项（微软 OfficePLUS、百度网盘插件等）：\n"
+            "它们随 Word 启动，关闭 Word 时要做云端收尾，联网就等超时、断网就秒退。\n\n"
+            "将要写入（会自动备份，可随时用「还原」退回）：\n\n"
+            "• 把上述加载项设为「不自动加载」\n"
+            "• 停止诊断遥测\n\n"
+            "不会改动你的登录状态，已登录的 Word 账号仍然保持登录。\n"
+            "代价：需要时得手动启用这些插件。\n\n"
+            "继续吗？",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if warn != QMessageBox.Yes:
+            return
+        self._office_start(OfficeWorker(lambda: otw.apply_fix()))
+
+    def _office_optional(self):
+        """可选加码：会踢账号，必须显式二次确认。"""
+        if otw is None:
+            return
+        warn = QMessageBox.warning(
+            self, "可选加码",
+            "⚠ 这一档会改变 Office 的账户与联网行为，请先看清楚：\n\n"
+            "• SignInOptions：禁止 Office 登录任何账户\n"
+            "  → 会把「已登录的 Word 账号踢下线」，用 OneDrive 云保存每次都要重新登录\n"
+            "• DisconnectedState 等：关闭连接体验、在线内容下载\n"
+            "  → 在线模板 / 智能查找 / 翻译 / 在线字体不可用\n\n"
+            "本地编辑、打开、打印、另存为本地文件都不受影响。\n"
+            "需要联网功能的话，之后随时可以用「还原」退回，或直接撤销本操作。\n\n"
+            "确定要应用吗？",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if warn != QMessageBox.Yes:
+            return
+        self._office_start(OfficeWorker(lambda: otw.apply_optional()))
+
+    def _office_revert(self):
+        if otw is None:
+            return
+        self._office_start(OfficeWorker(lambda: otw.revert_fix()))
+
+    def _office_bench(self):
+        if otw is None:
+            return
+        reply = QMessageBox.question(
+            self, "测速",
+            "将自动打开一次 Word，然后模拟点击右上角 ×，\n"
+            "并计时「进程真正消失」的秒数。约需 30 秒。\n"
+            "测量期间请勿操作，并确保当前没有其他 Word 在跑。继续吗？",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+        self._office_start(OfficeWorker(lambda: otw.benchmark()))
 
     def _on_harden_changed(self, *args):
         """加固参数变化：同步到实例属性（供 _gather_opts 使用）并刷新预览。"""
@@ -1006,7 +1227,28 @@ class App(QMainWindow):
         pass
 
 
+def _run_elevated(mode):
+    """以管理员身份重新启动后执行修复/还原，把结果写到文件再退出。
+
+    mode: 'office-fix' / 'office-revert'
+    """
+    from watermark_tool import office_tweak as otw2
+    ok, msg = (False, "未知的提权模式：%s" % mode)
+    if mode == "office-fix":
+        ok, msg, _ = otw2.apply_fix()
+    elif mode == "office-revert":
+        ok, msg, _ = otw2.revert_fix()
+    otw2.write_result(ok, msg)
+    print(msg)
+    return 0 if ok else 1
+
+
 def main():
+    # 提权后的那一趟：不做界面，只执行完把结果交给父进程读取
+    if "--office-fix" in sys.argv or "--office-revert" in sys.argv:
+        mode = "office-revert" if "--office-revert" in sys.argv else "office-fix"
+        return _run_elevated(mode)
+
     app = QApplication([])
     # 关闭/隐藏主窗口不应自动结束进程：后台守护模式下窗口是隐藏的，
     # 若保持默认 True，隐藏窗口可能会被判为“最后一个窗口已关闭”而连带退出应用。
@@ -1014,6 +1256,7 @@ def main():
     win = App()
     win.show()
     app.exec()
+    return 0
 
 
 if __name__ == "__main__":

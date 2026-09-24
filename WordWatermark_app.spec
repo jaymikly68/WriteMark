@@ -17,7 +17,9 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[],
-    hiddenimports=[],
+    # office_tweak 在 gui.py 里是「try 导入（模块缺失不该拖垮 UI）」，
+    # PyInstaller 的静态分析扫不到，必须显式声明，否则「Word 秒退」按钮点了没反应。
+    hiddenimports=['watermark_tool.office_tweak'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

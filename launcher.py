@@ -24,7 +24,7 @@ import subprocess
 import sys
 import zipfile
 
-APP_VERSION = "1.1.3"
+APP_VERSION = "1.1.5"
 APP_EXE_NAME = "WriteMarkApp.exe"
 PAYLOAD = "app_payload.zip"
 
@@ -95,38 +95,69 @@ def _tk_window(title: str, text: str):
     return update, close
 
 
+STAMP_NAME = "payload.stamp"
+
+
+def payload_fingerprint() -> str:
+    """当前 payload 的指纹（大小 + 修改时间）。
+
+    踩过的坑：runtime 目录是按 APP_VERSION 命名的，版本号不变就永远不重新解压。
+    于是「明明重新构建并发布了新的 exe，用户双击却还是跑着旧代码」——
+    遇到过一次（GUI 崩在 NameError 上，用户反馈"程序直接打不开"，
+    查了半天才发现他手里的新 exe 一直在复用 4 分钟前解压的旧运行时）。
+    所以这里用 payload 自身的指纹做陈旧检测，跟版本号彻底解耦。
+    """
+    try:
+        st = os.stat(payload_zip_path())
+        return "%d-%d" % (st.st_size, int(st.st_mtime))
+    except OSError as e:
+        return "err:%s" % e
+
+
 def ensure_app(update) -> str:
     dst = runtime_dir()
     app_exe = os.path.join(dst, APP_EXE_NAME)
+    stamp_file = os.path.join(dst, STAMP_NAME)
+
+    def _reinstall():
+        """重新解压 payload 到 dst。调用前必须自行保证 dst 不存在。"""
+        zip_path = payload_zip_path()
+        if not os.path.isfile(zip_path):
+            raise RuntimeError(f"找不到内嵌的运行体压缩包：{zip_path}")
+        update("正在准备运行环境（首次使用，仅需一次）…")
+        tmp = dst + ".tmp"
+        shutil.rmtree(tmp, ignore_errors=True)
+        os.makedirs(tmp, exist_ok=True)
+        total = 0
+        with zipfile.ZipFile(zip_path) as z:
+            names = z.namelist()
+            total = len(names)
+            for i, name in enumerate(names, 1):
+                z.extract(name, tmp)
+                if i % 40 == 0 or i == total:
+                    update(f"正在准备运行环境（首次使用，仅需一次）… {i}/{total}")
+        with open(os.path.join(tmp, STAMP_NAME), "w", encoding="utf-8") as f:
+            f.write(payload_fingerprint())
+        update("解压完成，正在启动…")
+        os.replace(tmp, dst)
+        if not os.path.isfile(os.path.join(dst, APP_EXE_NAME)):
+            raise RuntimeError(f"解压后找不到主程序：{os.path.join(dst, APP_EXE_NAME)}\n"
+                               f"请删除 {dst} 后重试。")
+        return os.path.join(dst, APP_EXE_NAME)
+
+    # 指纹对不上 = 这一版 payload 对应不上这份运行时，必须重来
+    if os.path.isfile(stamp_file):
+        try:
+            with open(stamp_file, encoding="utf-8") as f:
+                if f.read().strip() == payload_fingerprint() and os.path.isfile(app_exe):
+                    return app_exe
+        except OSError:
+            pass
     if os.path.isfile(app_exe):
-        return app_exe
-
-    zip_path = payload_zip_path()
-    if not os.path.isfile(zip_path):
-        raise RuntimeError(f"找不到内嵌的运行体压缩包：{zip_path}")
-
-    update("正在准备运行环境（首次使用，仅需一次）…")
-    os.makedirs(os.path.dirname(dst), exist_ok=True)
-    tmp = dst + ".tmp"
-    shutil.rmtree(tmp, ignore_errors=True)
-    os.makedirs(tmp, exist_ok=True)
-    with zipfile.ZipFile(zip_path) as z:
-        names = z.namelist()
-        total = len(names)
-        for i, name in enumerate(names, 1):
-            z.extract(name, tmp)
-            if i % 40 == 0 or i == total:
-                update(f"正在准备运行环境（首次使用，仅需一次）… {i}/{total}")
-    update("解压完成，正在启动…")
-    # 原子替换：避免中途失败留下残缺目录，导致下次启动用到坏文件
-    if os.path.isdir(dst):
+        # 没有 stamp 的旧运行时（更早版本的产物）一律重建，避免沿用未知年代的代码
         shutil.rmtree(dst, ignore_errors=True)
-    os.replace(tmp, dst)
-    app_exe = os.path.join(dst, APP_EXE_NAME)
-    if not os.path.isfile(app_exe):
-        raise RuntimeError(f"解压后找不到主程序：{app_exe}\n"
-                           f"请删除 {dst} 后重试。")
-    return app_exe
+
+    return _reinstall()
 
 
 def cleanup_old_version():
@@ -150,8 +181,22 @@ def _fatal(msg: str):
         pass
 
 
+def runtime_is_ready() -> bool:
+    """运行时目录是否真的、且是最新一版的。用于决定要不要显示进度窗口。"""
+    dst = runtime_dir()
+    stamp_file = os.path.join(dst, STAMP_NAME)
+    if not (os.path.isfile(os.path.join(dst, APP_EXE_NAME))
+            and os.path.isfile(stamp_file)):
+        return False
+    try:
+        with open(stamp_file, encoding="utf-8") as f:
+            return f.read().strip() == payload_fingerprint()
+    except OSError:
+        return False
+
+
 def main() -> int:
-    need_gui = not os.path.isfile(os.path.join(runtime_dir(), APP_EXE_NAME))
+    need_gui = not runtime_is_ready()
     update = lambda msg=None: None
     close = lambda: None
     if need_gui:
