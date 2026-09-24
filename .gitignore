@@ -23,3 +23,6 @@ build_backups/
 *.log
 _test_*/
 _wd_verify_tmp/
+
+# 打包中间产物：待追加到启动器尾部的 payload 压缩包（约 57MB），由 build_launcher.py 生成
+payload/

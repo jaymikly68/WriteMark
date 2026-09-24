@@ -1,11 +1,19 @@
 """
-校验打包后的 exe 是否真正包含了本次更新后的源码（避免“旧 exe 被运行”的问题）。
+校验打包后的产物是否真正包含了本次更新后的源码（避免“旧 exe 被运行”的问题）。
+
+现在交付形态是两层：
+    dist/WordWatermark.exe        启动器（极小 onefile，尾部追加了 payload zip）
+    dist/WriteMarkApp/WriteMarkApp.exe   真正的运行体（onedir，代码在 PYZ 里）
+因此：
+    python test_exe_verify.py                      # 同时校验两者
+    python test_exe_verify.py <运行体exe>          # 只校验运行体
 
 做法：用 PyInstaller 的归档读取器打开 exe，定位 PYZ.pyz，反序列化出
 watermark_tool.gui / watermark_tool.engine_docx 的代码对象，检查关键符号是否存在。
 """
 import sys
 import os
+import zipfile
 
 from PyInstaller.archive.readers import CArchiveReader
 from PyInstaller.archive.readers import ZlibArchiveReader
@@ -62,12 +70,38 @@ def collect_names(co):
     return names
 
 
+def verify_launcher(path):
+    """校验启动器：既能被当成 PE 执行，也在尾部挂着可被 zipfile 读穿的运行体包。"""
+    print("\n--- 启动器校验 ---")
+    if not os.path.exists(path):
+        print(f"[缺失] 启动器不存在：{path}")
+        return False
+    try:
+        with zipfile.ZipFile(path) as z:
+            names = z.namelist()
+    except Exception as e:
+        print(f"[错误] 启动器尾部 payload 不可读：{e}")
+        return False
+    has_app = any(n.endswith("WriteMarkApp.exe") for n in names)
+    size_mb = os.path.getsize(path) / 1048576
+    print(f"启动器 {os.path.basename(path)}：{size_mb:.1f} MB，"
+          f"内嵌运行体条目 {len(names)} 个，含 WriteMarkApp.exe -> {has_app}")
+    if not has_app:
+        return False
+    # 启动器自身只应有很小的运行时，保证退出时不会有大量临时文件要删
+    mods = load_pyz_modules(path)
+    gui_leaked = any(m.startswith("watermark_tool") for m in mods)
+    print(f"启动器未把应用代码打进自身 PYZ（避免临时目录膨胀） -> {not gui_leaked}")
+    return not gui_leaked
+
+
 def main():
-    exe = sys.argv[1] if len(sys.argv) > 1 else "dist/WordWatermark.exe"
-    if not os.path.exists(exe):
-        print("exe 不存在:", exe)
+    app_exe = sys.argv[1] if len(sys.argv) > 1 else \
+        os.path.join("dist", "WriteMarkApp", "WriteMarkApp.exe")
+    if not os.path.exists(app_exe):
+        print("exe 不存在:", app_exe)
         sys.exit(1)
-    mods = load_pyz_modules(exe)
+    mods = load_pyz_modules(app_exe)
 
     gui = mods.get("watermark_tool.gui")
     docx = mods.get("watermark_tool.engine_docx")
@@ -173,6 +207,28 @@ def main():
         print(f"watermark_tool.watchdog: 输出文件被删除后自动重建 -> {has_recreate}; "
               f"按份数校验并补齐 -> {has_count_check}")
         if not has_recreate or not has_count_check:
+            ok = False
+
+    # 本次更新：点关闭按钮不再“直接干掉进程”，而是弹选择；
+    # 并且 main() 关掉 quitOnLastWindowClosed + 显式 quit，避免隐藏窗口被当成退出。
+    names_gui = collect_names(gui) if gui is not None else set()
+    consts_gui = find_str_consts(gui) if gui is not None else []
+    has_ask = ("_ask_close_choice" in names_gui
+               and any("最小化到后台" in c for c in consts_gui)
+               and any("关闭窗口" in c for c in consts_gui))
+    # co_names 里是属性名，"(False)" 参数不会作为字符串常量出现
+    has_no_autoclose = "setQuitOnLastWindowClosed" in names_gui
+    # 托盘初始化失败不再静默吞掉（此前会导致“开了守护点关闭却整个进程退出”）
+    has_tray_debug = ("_tray_reason" in names_gui and "_tray_tried" in names_gui)
+    print(f"watermark_tool.gui: 关闭时弹选择(最小化/退出/取消) -> {has_ask}; "
+          f"main() 禁用 quitOnLastWindowClosed -> {has_no_autoclose}; "
+          f"托盘失败原因可见(_tray_reason) -> {has_tray_debug}")
+    if not (has_ask and has_no_autoclose and has_tray_debug):
+        ok = False
+
+    if len(sys.argv) <= 1:
+        # 未指定参数时，连同启动器一起校验
+        if not verify_launcher(os.path.join("dist", "WordWatermark.exe")):
             ok = False
 
     print("\n校验结果:", "通过 ✅" if ok else "存在问题 ❌")

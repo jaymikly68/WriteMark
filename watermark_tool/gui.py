@@ -108,6 +108,9 @@ class App(QMainWindow):
         self._last_inserted = None     # 上次插入实际写入的水印份数（守护按份数校验）
         self.tray = None
         self._quitting = False
+        self._confirm_close = True   # 点关闭按钮时是否弹“最小化/退出”询问（自动化脚本可关闭）
+        self._tray_tried = 0         # 托盘初始化尝试次数
+        self._tray_reason = ""       # 托盘初始化失败原因
 
         self.log_signal.connect(self._append_log)
         self.status_signal.connect(self._set_status)
@@ -674,14 +677,18 @@ class App(QMainWindow):
 
     # --------------------------------------------------------- 系统托盘常驻
     def _setup_tray(self):
-        """建立系统托盘图标——这样关掉主窗口后守护仍能在后台运行。"""
+        """建立系统托盘图标——这样关掉主窗口后守护仍能在后台运行。
+
+        托盘创建失败（部分精简版系统/资源管理器尚未就绪）时不能静默吞掉，
+        否则用户点关闭会直接走“退出进程”分支——这正是此前“开了后台保护、
+        点关闭却整个进程没了”的原因。这里记录原因并自动重试一次。
+        """
         try:
             if not QSystemTrayIcon.isSystemTrayAvailable():
-                self.tray = None
-                return
-            self.tray = QSystemTrayIcon(self)
-            self.tray.setIcon(self.style().standardIcon(QStyle.SP_ComputerIcon))
-            self.tray.setToolTip("Word 一键水印工具（守护运行中）")
+                raise RuntimeError("系统托盘不可用（QSystemTrayIcon.isSystemTrayAvailable() = False）")
+            tray = QSystemTrayIcon(self)
+            tray.setIcon(self.style().standardIcon(QStyle.SP_ComputerIcon))
+            tray.setToolTip("Word 一键水印工具（守护运行中）")
             menu = QMenu()
             act_show = menu.addAction("显示主窗口")
             act_show.triggered.connect(self._show_from_tray)
@@ -690,11 +697,18 @@ class App(QMainWindow):
             menu.addSeparator()
             act_quit = menu.addAction("退出程序")
             act_quit.triggered.connect(self._quit_app)
-            self.tray.setContextMenu(menu)
-            self.tray.activated.connect(self._on_tray_activated)
-            self.tray.show()
-        except Exception:
+            tray.setContextMenu(menu)
+            tray.activated.connect(self._on_tray_activated)
+            tray.show()
+            self.tray = tray
+        except Exception as e:
             self.tray = None
+            self._tray_reason = str(e)
+            self._tray_tried += 1
+            self._append_log(f"· 系统托盘初始化失败：{e}")
+            if self._tray_tried <= 1:
+                # 资源管理器（explorer）刚启动时托盘区可能尚未就绪，3 秒后重试一次
+                QTimer.singleShot(3000, self._setup_tray)
 
     def _on_tray_activated(self, reason):
         if reason == QSystemTrayIcon.Trigger:   # 左键单击：切回窗口
@@ -724,36 +738,88 @@ class App(QMainWindow):
         self.close()
         QApplication.quit()
 
+    def _ask_close_choice(self):
+        """点击标题栏关闭按钮时弹出询问。
+
+        返回 'minimize'（隐藏窗口、后台继续保护）/ 'quit'（退出程序）/ 'cancel'（取消）。
+        """
+        has_tray = self.tray is not None
+        box = QMessageBox(self)
+        box.setWindowTitle("关闭窗口")
+        box.setIcon(QMessageBox.Question)
+        if has_tray:
+            box.setText("后台保护正在运行。要如何处理这个窗口？")
+            box.setInformativeText(
+                "【最小化到后台】窗口隐藏到系统托盘，守护继续运行，水印被删会自动补回。\n"
+                "单击/双击托盘图标可重新打开窗口，右键托盘可停止守护或退出程序。\n\n"
+                "【退出程序】停止后台保护并完全退出进程。")
+        else:
+            box.setText("后台保护正在运行，但本机系统托盘不可用。")
+            box.setInformativeText(
+                f"托盘初始化失败原因：{self._tray_reason or '未知'}\n\n"
+                "【最小化到后台】窗口隐藏，进程留在后台守护（无托盘图标，重新打开需再次启动程序）。\n"
+                "【退出程序】停止后台保护并完全退出进程。")
+        btn_min = box.addButton("最小化到后台" if has_tray else "最小化到后台（无托盘图标）",
+                                QMessageBox.AcceptRole)
+        btn_quit = box.addButton("退出程序", QMessageBox.DestructiveRole)
+        btn_cancel = box.addButton("取消", QMessageBox.RejectRole)
+        box.setDefaultButton(btn_min)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is btn_quit:
+            return "quit"
+        if clicked is btn_cancel:
+            return "cancel"
+        return "minimize"
+
     def closeEvent(self, event):
         """关闭窗口时清理后台线程，避免进程无法退出（表现为关闭后卡顿/驻留）。
 
         要点：
-        - 守护在运行时（且有系统托盘）→ 只最小化到托盘，守护继续后台运行，
+        - 守护运行时：先弹询问（最小化到托盘继续保护 / 退出程序 / 取消），
+          选择“最小化”则隐藏窗口，守护继续后台运行，
           这样“水印被删自动补回”不再依赖主窗口一直开着。
         - 真正退出时：守护线程已是 daemon，只发停止信号、绝不阻塞等待。
-        - 字体读取线程(FontWorker)与工作线程(Worker)为 QThread，若仍运行会拖慢
-          进程退出；这里显式停止，并设兜底：启动一个守护计时线程，1.2s 后若进程
-          仍未自行退出（典型根因是 Word COM 代理清理阻塞 ~30s），则强制 os._exit(0)，
-          确保“关闭后卡顿半分钟”的问题彻底解决。
+        - 兜底：启动一个计时线程，1.2s 后若进程仍未自行退出，强制 os._exit(0)。
         - 工作/字体线程若超时仍未结束则强制 terminate。
         """
-        # 守护运行中：最小化到托盘，而不是退出（守护继续在后台跑）
-        if self.wd is not None and self.tray is not None and not self._quitting:
-            event.ignore()
-            self.hide()
-            try:
-                self.tray.showMessage(
-                    "Word 一键水印工具",
-                    "守护已在后台继续运行，水印被删会自动补回。\n"
-                    "右键托盘图标可显示窗口 / 停止守护 / 退出程序。",
-                    QSystemTrayIcon.Information, 4000)
-            except Exception:
-                pass
-            self._append_log("已最小化到系统托盘，守护继续在后台运行。")
-            return
+        # 守护运行中：先问用户要不要留后台继续保护
+        if self.wd is not None and not self._quitting:
+            if getattr(self, "_confirm_close", True) and self.isVisible():
+                choice = self._ask_close_choice()
+            elif self._quitting:
+                # 自动化脚本 / 托盘“退出程序”已明确表达要退出，无需再问
+                choice = "quit"
+            else:
+                choice = "minimize"
+            if choice == "cancel":
+                event.ignore()
+                return
+            if choice == "minimize":
+                event.ignore()
+                self.hide()
+                tip = ("守护已在后台继续运行，水印被删会自动补回。\n"
+                       "单击/双击托盘图标可重新打开窗口，右键托盘可停止守护 / 退出程序。")
+                shown = False
+                try:
+                    if self.tray is not None:
+                        self.tray.showMessage("Word 一键水印工具", tip,
+                                              QSystemTrayIcon.Information, 4000)
+                        shown = True
+                except Exception:
+                    pass
+                if shown:
+                    self._append_log("已最小化到系统托盘，守护继续在后台运行。")
+                else:
+                    self._append_log("窗口已隐藏，进程仍在后台守护（本机托盘不可用，"
+                                     "重新打开界面需再次启动程序）。")
+                return
 
-        # 兜底：无论后续清理是否卡住，1.2s 后强制结束进程（正常退出时此计时线程随进程消亡，不会触发）
-        killer = threading.Timer(1.2, lambda: os._exit(0))
+        # 兜底：无论后续清理是否卡住，超时(6s)后强制结束进程。
+        # 6s 是刻意留出的余量：下面等待后台线程的完整路径最长约 3s，
+        # 必须让“正常清理”跑在兜底之前完成，否则明明能优雅退出却被硬杀
+        # （此前的 1.2s 就会误杀正在等待线程退出的正常关闭流程）。
+        killer = threading.Timer(6.0, lambda: os._exit(0))
         killer.daemon = True
         killer.start()
         if self.tray is not None:
@@ -769,18 +835,21 @@ class App(QMainWindow):
         fw = getattr(self, "_font_worker", None)
         if fw is not None and fw.isRunning():
             fw.quit()
-            if not fw.wait(1500):
+            if not fw.wait(1000):
                 fw.terminate()
-                fw.wait(500)
-        # 工作线程：最多等 2 秒，超时强杀
+                fw.wait(300)
+        # 工作线程：最多等 1.2 秒，超时强杀（总清理时间必须短于上面 6s 的兜底）
         w = self._worker
         if w is not None and w.isRunning():
             w.requestInterruption()
             w.quit()
-            if not w.wait(2000):
+            if not w.wait(1200):
                 w.terminate()
-                w.wait(500)
+                w.wait(300)
         event.accept()
+        # 已显式关闭 setQuitOnLastWindowClosed，这里必须把事件循环也退出，
+        # 否则窗口关了但 app.exec() 不返回，会留下一个没有界面的僵尸进程。
+        QApplication.quit()
 
     def _on_result(self, ok, msg):
         if not ok:
@@ -907,6 +976,9 @@ class App(QMainWindow):
 
 def main():
     app = QApplication([])
+    # 关闭/隐藏主窗口不应自动结束进程：后台守护模式下窗口是隐藏的，
+    # 若保持默认 True，隐藏窗口可能会被判为“最后一个窗口已关闭”而连带退出应用。
+    app.setQuitOnLastWindowClosed(False)
     win = App()
     win.show()
     app.exec()

@@ -33,6 +33,10 @@ def test_watchdog_close_no_block(app):
     w.wd = wd
     time.sleep(0.2)  # 让守护跑一轮
 
+    # 关闭按钮现在会弹“最小化到后台 / 退出程序 / 取消”询问（模态框），
+    # 自动化脚本里必须显式表达“要退出”，否则会一直等用户输入。
+    w._confirm_close = False
+    w._quitting = True
     t0 = time.time()
     w.closeEvent(QCloseEvent())
     dt = time.time() - t0

@@ -1,4 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
+"""单文件版构建。
+
+重要（退出卡顿的根因）：onefile exe 运行时会把整个运行时解包到 %TEMP%\\_MEIxxxxxx，
+程序关闭后 bootloader 必须把这整个目录删完，进程才算退出——
+这段时间表现为“关了窗口还卡十几秒”。因此这里把依赖砍到最小，
+详见 exclude_conf.py 的说明。
+"""
+from exclude_conf import EXCLUDES
 
 
 a = Analysis(
@@ -10,7 +18,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=EXCLUDES,
     noarchive=False,
     optimize=0,
 )
