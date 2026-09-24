@@ -138,3 +138,12 @@ def has_watermark(path: str) -> bool:
             raise RuntimeError("处理 .doc 需要本机安装 Microsoft Word。")
         return engine_com.has_watermark(path)
     return engine_docx.has_watermark(path)
+
+
+def watermark_count(path: str) -> int:
+    """统计水印图形份数：守护用它判断水印是否被“部分删除”。"""
+    if _use_com(path):
+        if not com_available():
+            raise RuntimeError("处理 .doc 需要本机安装 Microsoft Word。")
+        return engine_com.count_watermarks(path)
+    return engine_docx.count_watermarks(path)

@@ -90,10 +90,18 @@ def main():
         has_split_ui = (any("中文字体:" == c for c in consts)
                         and any("西文字体:" == c for c in consts)
                         and "cn_font_combo" in names and "latin_font_combo" in names)
+        # 防去除加固：平铺/冗余开关 + 系统托盘常驻
+        has_harden = ("tile_chk" in names and "redundant_chk" in names
+                      and "tile_rows_spin" in names and "_on_harden_changed" in names
+                      and any("平铺满页" in c for c in consts))
+        has_tray = ("QSystemTrayIcon" in names and "_setup_tray" in names
+                    and "_quit_app" in names and "_show_from_tray" in names
+                    and "_stop_watch_from_tray" in names)
         print(f"watermark_tool.gui: 含字体相关 _maybe_load_word_fonts/_apply_word_fonts/FontWorker"
               f" + 可编辑下拉框(Editable/Completer/CompletionMode/FilterMode/Model) -> {has_new}; "
-              f"中西文字体双下拉框 -> {has_split_ui}")
-        if not has_new or not has_split_ui:
+              f"中西文字体双下拉框 -> {has_split_ui}; "
+              f"防去除加固(平铺/冗余) -> {has_harden}; 系统托盘常驻 -> {has_tray}")
+        if not has_new or not has_split_ui or not has_harden or not has_tray:
             ok = False
 
     if docx is None:
@@ -115,14 +123,22 @@ def main():
                      and "is_cjk" in names_docx)
         # 混排基线对齐：用 getlength 计算各字体字宽、anchor="ls" 共基线
         has_baseline = "getlength" in names_docx and any("ls" == c for c in consts)
+        # 防去除加固：平铺布局 + 伪装显示名 + 份数统计 + 页脚冗余
+        has_harden_docx = ("tile_layout" in names_docx and "decoy_name" in names_docx
+                           and "DECOY_NAMES" in names_docx
+                           and "count_watermarks" in names_docx
+                           and "_iter_footers" in names_docx
+                           and any("redundant" == c for c in consts))
         print(f"watermark_tool.engine_docx: 含新标记 WB_WATERMARK_TEXT -> {has_new_mark}; "
               f"含旧标记 WB_WATERMARK -> {has_old_mark}; 透传 font_name -> {has_font_param}; "
               f"引用 word_fonts 模块 -> {has_word_fonts_ref}; 字号控制大小 text_base -> {has_text_base}; "
               f"中文回退渲染(缺字形参照\\uffff) -> {has_cjk_fallback}; "
-              f"中西文分别选字体(cn/latin/is_cjk) -> {has_split}; 混排基线对齐(getlength/anchor) -> {has_baseline}")
+              f"中西文分别选字体(cn/latin/is_cjk) -> {has_split}; 混排基线对齐(getlength/anchor) -> {has_baseline}; "
+              f"防去除加固(tile/decoy/count/footer) -> {has_harden_docx}")
         if not has_new_mark or has_old_mark or not (has_font_param and has_word_fonts_ref
                                                     and has_text_base and has_cjk_fallback
-                                                    and has_split and has_baseline):
+                                                    and has_split and has_baseline
+                                                    and has_harden_docx):
             ok = False
 
     if wf is None:
@@ -151,8 +167,12 @@ def main():
         # 守护修复：输出文件被整个删除时能从原文件重建（此前只抛 Package not found 永不补回）
         has_recreate = (any("输出文件已被删除" in c for c in consts)
                         and "exists" in names)
-        print(f"watermark_tool.watchdog: 输出文件被删除后自动重建 -> {has_recreate}")
-        if not has_recreate:
+        # 按份数校验：水印被删掉一部分也要整体补齐
+        has_count_check = (any("部分移除" in c for c in consts)
+                           and "_reinsert" in names and "watermark_count" in names)
+        print(f"watermark_tool.watchdog: 输出文件被删除后自动重建 -> {has_recreate}; "
+              f"按份数校验并补齐 -> {has_count_check}")
+        if not has_recreate or not has_count_check:
             ok = False
 
     print("\n校验结果:", "通过 ✅" if ok else "存在问题 ❌")

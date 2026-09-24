@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLineEdit, QPushButton, QLabel, QFileDialog, QComboBox, QCompleter,
     QDoubleSpinBox, QCheckBox, QSlider, QTextEdit, QColorDialog, QMessageBox,
-    QScrollArea,
+    QScrollArea, QSystemTrayIcon, QMenu, QStyle,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QStringListModel
 from PySide6.QtGui import QColor, QImage, QPixmap
@@ -100,11 +100,20 @@ class App(QMainWindow):
         self._fonts_asked = False      # 是否已问过读取字体权限（每会话一次）
         self._fonts_loaded = False     # 是否已成功扩充字体下拉框
         self._font_worker = None       # 持有引用，避免线程运行中对象被 GC 导致崩溃
+        # 防去除加固
+        self.tile = False              # 平铺满页（默认关，外观与历史一致）
+        self.tile_rows = 5
+        self.tile_cols = 2
+        self.redundant = True          # 多份冗余嵌入（对可见外观零影响，默认开）
+        self._last_inserted = None     # 上次插入实际写入的水印份数（守护按份数校验）
+        self.tray = None
+        self._quitting = False
 
         self.log_signal.connect(self._append_log)
         self.status_signal.connect(self._set_status)
 
         self._build()
+        self._setup_tray()
 
     # ---------------------------------------------------------- 线程安全日志
     def _append_log(self, msg):
@@ -277,6 +286,40 @@ class App(QMainWindow):
         self._btn_clear = QPushButton("一键清除水印"); self._btn_clear.clicked.connect(self._clear); hb.addWidget(self._btn_clear)
         root.addLayout(hb)
 
+        # ---------------- 防去除加固（可选）
+        f_hard = self._make_group("防去除加固（让水印更难被删掉）")
+        vh = f_hard.layout()
+        self.tile_chk = QCheckBox("平铺满页水印（覆盖整页，PS/AI 修图难以抹除）")
+        self.tile_chk.setChecked(self.tile)
+        self.tile_chk.setToolTip(
+            "把水印从“单个居中”改成整页多行多列平铺。\n"
+            "稀疏的单个水印，用 PS 的内容识别填充或 AI 去水印很容易抹掉且不留痕迹；\n"
+            "覆盖整页的密集纹理要去掉就得把整页重画，难度陡增。\n"
+            "注意：这是提升“去不掉”程度的关键手段，但没有任何方案能保证绝对去不掉。")
+        vh.addWidget(self.tile_chk)
+        row = QHBoxLayout(); row.addWidget(QLabel("平铺行列:"))
+        self.tile_rows_spin = QDoubleSpinBox()
+        self.tile_rows_spin.setRange(1, 30); self.tile_rows_spin.setDecimals(0)
+        self.tile_rows_spin.setSingleStep(1); self.tile_rows_spin.setValue(self.tile_rows)
+        self.tile_rows_spin.setToolTip("纵向行数：行数越多越密，越难被修图抹掉")
+        row.addWidget(self.tile_rows_spin)
+        row.addWidget(QLabel("× 列"))
+        self.tile_cols_spin = QDoubleSpinBox()
+        self.tile_cols_spin.setRange(1, 30); self.tile_cols_spin.setDecimals(0)
+        self.tile_cols_spin.setSingleStep(1); self.tile_cols_spin.setValue(self.tile_cols)
+        self.tile_cols_spin.setToolTip("横向列数：列数越多、单个水印越小")
+        row.addWidget(self.tile_cols_spin)
+        row.addStretch(1)
+        vh.addLayout(row)
+        self.redundant_chk = QCheckBox("多份冗余嵌入（页眉+页脚都写入，图形名不使用 watermark 字样）")
+        self.redundant_chk.setChecked(self.redundant)
+        self.redundant_chk.setToolTip(
+            "除页眉外，把水印也写进页脚；并把图形的显示名改成普通图片那样的名字。\n"
+            "Word/WPS 的“删除水印”按钮和多数去水印脚本都是按名称/结构匹配水印图形的，\n"
+            "这样它们就找不到、删不干净。对肉眼外观没有任何影响。")
+        vh.addWidget(self.redundant_chk)
+        root.addWidget(f_hard)
+
         # 预览
         f_prev = self._make_group("水印预览（示意，脱离 Word 直接查看）")
         vp = f_prev.layout()
@@ -325,6 +368,10 @@ class App(QMainWindow):
         self.img_edit.textChanged.connect(self._schedule_preview)
         self.text_chk.stateChanged.connect(self._schedule_preview)
         self.img_chk.stateChanged.connect(self._schedule_preview)
+        # 加固参数：改动即刷新预览（平铺密度直接影响观感）
+        self.tile_chk.stateChanged.connect(self._on_harden_changed)
+        self.tile_rows_spin.valueChanged.connect(self._on_harden_changed)
+        self.tile_cols_spin.valueChanged.connect(self._on_harden_changed)
 
     def _make_group(self, title):
         """生成一个带标题的边框分组容器，返回该 QWidget（其 layout 已建好、垂直）。"""
@@ -339,6 +386,14 @@ class App(QMainWindow):
 
     def _schedule_preview(self, *args):
         self._preview_timer.start()
+
+    def _on_harden_changed(self, *args):
+        """加固参数变化：同步到实例属性（供 _gather_opts 使用）并刷新预览。"""
+        self.tile = self.tile_chk.isChecked()
+        self.tile_rows = int(self.tile_rows_spin.value())
+        self.tile_cols = int(self.tile_cols_spin.value())
+        self.redundant = self.redundant_chk.isChecked()
+        self._schedule_preview()
 
     def _make_slider_spin(self, label, lo, hi, val, decimals, step, suffix, on_change):
         """构造【滑块 + 数字输入框（精确到小数点后 decimals 位）】联动行。
@@ -578,6 +633,11 @@ class App(QMainWindow):
             },
             "text_enabled": self.text_enabled,
             "image_enabled": self.image_enabled,
+            # 防去除加固（对两类水印同时生效，故放在顶层）
+            "tile": self.tile_chk.isChecked() if hasattr(self, "tile_chk") else self.tile,
+            "tile_rows": int(self.tile_rows_spin.value()) if hasattr(self, "tile_rows_spin") else self.tile_rows,
+            "tile_cols": int(self.tile_cols_spin.value()) if hasattr(self, "tile_cols_spin") else self.tile_cols,
+            "redundant": self.redundant_chk.isChecked() if hasattr(self, "redundant_chk") else self.redundant,
         }
 
     def _gather_kinds(self):
@@ -612,21 +672,95 @@ class App(QMainWindow):
         if busy:
             self.status_label.setText("处理中...")
 
+    # --------------------------------------------------------- 系统托盘常驻
+    def _setup_tray(self):
+        """建立系统托盘图标——这样关掉主窗口后守护仍能在后台运行。"""
+        try:
+            if not QSystemTrayIcon.isSystemTrayAvailable():
+                self.tray = None
+                return
+            self.tray = QSystemTrayIcon(self)
+            self.tray.setIcon(self.style().standardIcon(QStyle.SP_ComputerIcon))
+            self.tray.setToolTip("Word 一键水印工具（守护运行中）")
+            menu = QMenu()
+            act_show = menu.addAction("显示主窗口")
+            act_show.triggered.connect(self._show_from_tray)
+            self._act_stop = menu.addAction("停止守护")
+            self._act_stop.triggered.connect(self._stop_watch_from_tray)
+            menu.addSeparator()
+            act_quit = menu.addAction("退出程序")
+            act_quit.triggered.connect(self._quit_app)
+            self.tray.setContextMenu(menu)
+            self.tray.activated.connect(self._on_tray_activated)
+            self.tray.show()
+        except Exception:
+            self.tray = None
+
+    def _on_tray_activated(self, reason):
+        if reason == QSystemTrayIcon.Trigger:   # 左键单击：切回窗口
+            self._show_from_tray()
+
+    def _show_from_tray(self):
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _stop_watch_from_tray(self):
+        if hasattr(self, "watch_chk"):
+            self.watch_chk.setChecked(False)     # 触发 _toggle_watch 停止守护
+        self._append_log("已从托盘停止守护。")
+
+    def _quit_app(self):
+        """托盘“退出程序”：真正结束进程（含守护与后台线程清理）。"""
+        self._quitting = True
+        if self.tray is not None:
+            try:
+                self.tray.hide()
+            except Exception:
+                pass
+        if self.wd:
+            self.wd.stop_nowait()
+            self.wd = None
+        self.close()
+        QApplication.quit()
+
     def closeEvent(self, event):
         """关闭窗口时清理后台线程，避免进程无法退出（表现为关闭后卡顿/驻留）。
 
         要点：
-        - 守护线程已是 daemon，关闭时只发停止信号、绝不阻塞等待。
+        - 守护在运行时（且有系统托盘）→ 只最小化到托盘，守护继续后台运行，
+          这样“水印被删自动补回”不再依赖主窗口一直开着。
+        - 真正退出时：守护线程已是 daemon，只发停止信号、绝不阻塞等待。
         - 字体读取线程(FontWorker)与工作线程(Worker)为 QThread，若仍运行会拖慢
           进程退出；这里显式停止，并设兜底：启动一个守护计时线程，1.2s 后若进程
           仍未自行退出（典型根因是 Word COM 代理清理阻塞 ~30s），则强制 os._exit(0)，
           确保“关闭后卡顿半分钟”的问题彻底解决。
         - 工作/字体线程若超时仍未结束则强制 terminate。
         """
+        # 守护运行中：最小化到托盘，而不是退出（守护继续在后台跑）
+        if self.wd is not None and self.tray is not None and not self._quitting:
+            event.ignore()
+            self.hide()
+            try:
+                self.tray.showMessage(
+                    "Word 一键水印工具",
+                    "守护已在后台继续运行，水印被删会自动补回。\n"
+                    "右键托盘图标可显示窗口 / 停止守护 / 退出程序。",
+                    QSystemTrayIcon.Information, 4000)
+            except Exception:
+                pass
+            self._append_log("已最小化到系统托盘，守护继续在后台运行。")
+            return
+
         # 兜底：无论后续清理是否卡住，1.2s 后强制结束进程（正常退出时此计时线程随进程消亡，不会触发）
         killer = threading.Timer(1.2, lambda: os._exit(0))
         killer.daemon = True
         killer.start()
+        if self.tray is not None:
+            try:
+                self.tray.hide()
+            except Exception:
+                pass
 
         if self.wd:
             self.wd.stop_nowait()  # 仅置停止信号，不 join 阻塞
@@ -705,7 +839,16 @@ class App(QMainWindow):
             self.out_edit.setText(out)
         self._last_action = "insert"
         path, opts = self.file_path, self._gather_opts()
-        self._run(lambda: core.insert_watermark(path, kinds, output_path=out, **opts))
+        self._last_inserted = None
+
+        def job():
+            res = core.insert_watermark(path, kinds, output_path=out, **opts)
+            # 记住实际写入的份数：开启守护后按这个数量校验是否被删过
+            if isinstance(res, dict):
+                self._last_inserted = res.get("inserted")
+            return res
+
+        self._run(job)
 
     def _clear(self):
         if not self.file_path or not os.path.exists(self.file_path):
@@ -738,10 +881,21 @@ class App(QMainWindow):
                 self.watch_chk.setChecked(False)
                 return
             opts = self._gather_opts()
+            expect = None
+            try:
+                # 份数基准：优先用本次插入的实际份数；否则以“输出文件当前份数”为基准
+                if self._last_inserted:
+                    expect = int(self._last_inserted)
+                elif os.path.exists(out):
+                    expect = core.watermark_count(out) or None
+            except Exception:
+                expect = self._last_inserted
             self.wd = watchdog.WatermarkWatchdog(
                 self.file_path, out, kinds, opts, interval=self.interval_spin.value(),
-                log=self.thread_log)
+                log=self.thread_log, expected=expect)
             self.wd.start()
+            if expect:
+                self._append_log(f"守护水印份数基准：{expect} 份（被删掉任何一份都会自动补齐）。")
         else:
             if self.wd:
                 self.wd.stop(); self.wd = None

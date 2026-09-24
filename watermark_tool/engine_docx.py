@@ -40,6 +40,19 @@ MARK_TEXT = "WB_WATERMARK_TEXT"
 MARK_IMG = "WB_WATERMARK_IMG"
 MARK_NAMES = (MARK_TEXT, MARK_IMG)
 
+# “防去除加固”用的伪装显示名。
+# Word/WPS 的“删除水印”按钮、以及多数去水印脚本，都是按图形名称或结构去匹配
+# 水印图形的；这里改用普通插图那样的无害名字，让它们认不出来、删不干净。
+# 本工具自己的识别标记改存到 wp:docPr/@descr（标准属性，Word 会保留），
+# 因此“伪装”不影响本工具的识别与一键清除。
+DECOY_NAMES = ("图片", "Image", "Shape", "Graphic", "Object", "Content")
+
+
+def decoy_name(idx: int) -> str:
+    """生成第 idx 个图形的伪装显示名（形如“图片 101”，与 Word 自动命名风格一致）。"""
+    base = DECOY_NAMES[idx % len(DECOY_NAMES)]
+    return f"{base} {100 + idx}"
+
 # 文本水印尺寸模型：font_size 作为“字号/实际大小”的主控制项（与 Word COM 引擎一致），
 # scale 作为微调倍数。默认 font_size=120、scale=1.0 时文本覆盖约 0.85 倍页宽，
 # 与历史外观保持一致；字号越小水印越小（此前 .docx 路径字号只影响清晰度、不改大小，已修正）。
@@ -50,6 +63,42 @@ TEXT_REF_SIZE = 120.0
 def text_base(font_size: float) -> float:
     """把字号换算成“占页宽比例”的基准值（再乘用户 scale 得到最终覆盖比例）。"""
     return TEXT_COVER * (float(font_size) / TEXT_REF_SIZE)
+
+
+def tile_layout(page_w, page_h, nat_w, nat_h, rows, cols, scale=1.0,
+                offset_x=0.0, offset_y=0.0):
+    """平铺布局：把页面切成 rows×cols 个单元格，每个格内放一份水印。
+
+    返回 [(x, y, w, h), ...]（与 page_w/page_h 同单位）。
+    单个瓦片按单元格等比缩放（保持原始宽高比），再整体按百分比偏移。
+
+    为什么要平铺：稀疏的单个居中水印，PS 的内容识别填充 / AI 修图去水印很容易
+    抹掉且不留痕迹；覆盖整页的密集纹理要想去掉就得把整页重画，难度陡增。
+    """
+    rows = max(1, int(rows))
+    cols = max(1, int(cols))
+    cell_w = page_w / float(cols)
+    cell_h = page_h / float(rows)
+    # 瓦片尽量占满格宽（scale>1 时会与相邻瓦片重叠，密度更高、更难被修图抹掉）；
+    # 纵向按格高的 90% 作为上限，避免文字水印被拉得过高变形。
+    want_w = cell_w * scale
+    want_h = cell_h * 0.9 * scale
+    if nat_w and nat_h:
+        disp_w = min(want_w, want_h * float(nat_w) / float(nat_h))
+    else:
+        disp_w = want_w
+    disp_w = max(1.0, disp_w)
+    disp_h = max(1.0, disp_w * (float(nat_h) / float(nat_w) if nat_w else 1.0))
+
+    shift_x = offset_x / 100.0 * page_w
+    shift_y = offset_y / 100.0 * page_h
+    boxes = []
+    for r in range(rows):
+        for c in range(cols):
+            x = c * cell_w + (cell_w - disp_w) / 2.0 + shift_x
+            y = r * cell_h + (cell_h - disp_h) / 2.0 + shift_y
+            boxes.append((x, y, disp_w, disp_h))
+    return boxes
 
 # 让 lxml 序列化时使用标准前缀（a:/pic:），而非 ns2:/ns3:，
 # Word 能容忍任意前缀，但 WPS 等实现对此更敏感，标准前缀兼容性最好。
@@ -220,12 +269,15 @@ def prepare_image_png(path: str, alpha: int) -> Image.Image:
 # ---------------------------------------------------------------------------
 # DrawingML 构造
 # ---------------------------------------------------------------------------
-def _make_drawing(rId: str, cx: int, cy: int, rot_deg: float, name: str, docpr_id: int,
-                 pos_x: int, pos_y: int) -> etree._Element:
+def _make_drawing(rId: str, cx: int, cy: int, rot_deg: float, name: str, descr: str,
+                 docpr_id: int, pos_x: int, pos_y: int) -> etree._Element:
     """构造一个衬于文字下方、可旋转、按绝对坐标定位的锚定图形 XML。
 
     pos_x / pos_y 为图形左上角相对页面原点（页面左上角）的 EMU 坐标，
     由调用方根据“居中基准 + 百分比偏移”算出，从而支持上下左右独立调整。
+
+    name 为对外显示名（加固时用伪装名，避免被“删除水印”按名字抓走），
+    descr 存本工具的私有标记——Word 会保留该标准属性，故识别与清除不受影响。
     """
     drawing = etree.Element(qn("w:drawing"))
     anchor = etree.SubElement(
@@ -247,7 +299,8 @@ def _make_drawing(rId: str, cx: int, cy: int, rot_deg: float, name: str, docpr_i
     etree.SubElement(anchor, qn("wp:effectExtent"), {"l": "0", "t": "0", "r": "0", "b": "0"})
     etree.SubElement(anchor, qn("wp:wrapNone"))
 
-    docPr = etree.SubElement(anchor, qn("wp:docPr"), {"id": str(docpr_id), "name": name, "descr": name})
+    docPr = etree.SubElement(anchor, qn("wp:docPr"),
+                             {"id": str(docpr_id), "name": name, "descr": descr})
     etree.SubElement(anchor, qn("wp:cNvGraphicFramePr"))
 
     graphic = etree.SubElement(anchor, qn("a:graphic"))
@@ -255,7 +308,8 @@ def _make_drawing(rId: str, cx: int, cy: int, rot_deg: float, name: str, docpr_i
     pic = etree.SubElement(graphicData, qn("pic:pic"))
 
     nvPicPr = etree.SubElement(pic, qn("pic:nvPicPr"))
-    etree.SubElement(nvPicPr, qn("pic:cNvPr"), {"id": "0", "name": name + "_img", "descr": name})
+    etree.SubElement(nvPicPr, qn("pic:cNvPr"),
+                     {"id": str(docpr_id), "name": name + "_img", "descr": descr})
     etree.SubElement(nvPicPr, qn("pic:cNvPicPr"))
 
     blipFill = etree.SubElement(pic, qn("pic:blipFill"))
@@ -290,14 +344,43 @@ def _iter_headers(document, section):
     except Exception:
         pass
     # 去重：链接到前一节的页眉会共享同一个 part，只处理一次
+    return _dedup_parts(headers)
+
+
+def _iter_footers(document, section):
+    """返回该节所有“非链接”的页脚（主/首页/偶数页）。加固时把水印也放进页脚。"""
+    footers = [section.footer]
+    try:
+        if section.different_first_page_header_footer:
+            footers.append(section.first_page_footer)
+    except Exception:
+        pass
+    try:
+        if document.part.settings.odd_and_even_pages_header_footer:
+            footers.append(section.even_page_footer)
+    except Exception:
+        pass
+    return _dedup_parts(footers)
+
+
+def _dedup_parts(parts):
+    """按底层 part 去重：链接到前一节的页眉/页脚共享同一 part，只处理一次。"""
     seen = set()
     result = []
-    for h in headers:
-        if h.part in seen:
+    for p in parts:
+        if p.part in seen:
             continue
-        seen.add(h.part)
-        result.append(h)
+        seen.add(p.part)
+        result.append(p)
     return result
+
+
+def _iter_parts(document, section, include_footers=False):
+    """返回该节需要写入水印的所有页眉（+可选页脚）。"""
+    parts = _iter_headers(document, section)
+    if include_footers:
+        parts = parts + _iter_footers(document, section)
+    return parts
 
 
 def _detach_drawing(drawing):
@@ -309,50 +392,84 @@ def _detach_drawing(drawing):
         drawing.getparent().remove(drawing)
 
 
-def _remove_in_header(header, name=None, clear_any=False):
-    """移除页眉中的水印图形。
+def _mark_of(drawing):
+    """取出图形上本工具的私有标记（descr 优先，兼容旧版写在 name 上的文件）。
 
-    - name 给定时：仅删除该名称的图形（插入前“替换”用）。
+    加固模式下显示名是伪装名，标记只存在 descr 里，因此必须两个都查。
+    """
+    docPr = drawing.find(".//" + qn("wp:docPr"))
+    if docPr is None:
+        return None
+    ds = docPr.get("descr")
+    if ds in MARK_NAMES:
+        return ds
+    nm = docPr.get("name")
+    if nm in MARK_NAMES:
+        return nm
+    return None
+
+
+def _remove_in_part(part, name=None, clear_any=False):
+    """移除页眉/页脚中的水印图形。
+
+    - name 给定时：仅删除该标记的图形（插入前“替换”用）。
     - name 为 None 且 clear_any=False：删除所有本工具标记的水印（插入前“替换”用）。
     - name 为 None 且 clear_any=True：删除本工具标记的水印 **以及** 任何“衬于文字下方”
       (behindDoc=1) 的图形——这样能清掉 Word 原生水印或其它工具留下的水印，
       满足“去掉原本就有水印的 Word”的需求。
     """
-    root = header._element
+    root = part._element
     removed = 0
     for drawing in list(root.iter(qn("w:drawing"))):
         anchor = drawing.find(".//" + qn("wp:anchor"))
         behind = anchor is not None and anchor.get("behindDoc") == "1"
-        docPr = drawing.find(".//" + qn("wp:docPr"))
-        nm = docPr.get("name") if docPr is not None else None
+        mark = _mark_of(drawing)
         if name is not None:
-            if nm == name:
+            if mark == name:
                 _detach_drawing(drawing)
                 removed += 1
-        elif nm in MARK_NAMES or (clear_any and behind):
+        elif mark is not None or (clear_any and behind):
             _detach_drawing(drawing)
             removed += 1
     return removed
 
 
-def _add_drawing_to_header(header, drawing):
-    """把 drawing 追加到页眉的一个新 run 中（必要时先为该节创建独立页眉）。"""
-    # 触发 python-docx 为“链接到前一节”的页眉创建独立 part
-    if not header.paragraphs:
-        header.add_paragraph()
-    p = header.paragraphs[0]
+# 兼容旧调用名
+_remove_in_header = _remove_in_part
+
+
+def _add_drawing_to_part(part, drawing):
+    """把 drawing 追加到页眉/页脚的一个新 run 中（必要时先创建独立 part）。"""
+    # 触发 python-docx 为“链接到前一节”的页眉/页脚创建独立 part
+    if not part.paragraphs:
+        part.add_paragraph()
+    p = part.paragraphs[0]
     r = p.add_run()
     r._r.append(drawing)
 
 
-def _has_watermark_in_doc(document) -> bool:
+# 兼容旧调用名
+_add_drawing_to_header = _add_drawing_to_part
+
+
+def _iter_marked_drawings(document):
+    """遍历文档（含页脚）里所有带本工具标记的图形。"""
     for section in document.sections:
-        for header in _iter_headers(document, section):
-            for drawing in header._element.iter(qn("w:drawing")):
-                docPr = drawing.find(".//" + qn("wp:docPr"))
-                if docPr is not None and docPr.get("name") in MARK_NAMES:
-                    return True
+        for part in _iter_parts(document, section, include_footers=True):
+            for drawing in part._element.iter(qn("w:drawing")):
+                if _mark_of(drawing) is not None:
+                    yield drawing
+
+
+def _has_watermark_in_doc(document) -> bool:
+    for _ in _iter_marked_drawings(document):
+        return True
     return False
+
+
+def _count_marks_in_doc(document) -> int:
+    """统计本工具添加的水印图形份数（守护用它判断“够不够份”）。"""
+    return sum(1 for _ in _iter_marked_drawings(document))
 
 
 # ---------------------------------------------------------------------------
@@ -364,11 +481,20 @@ def insert_watermark(path: str, kinds, **opts) -> dict:
     文本与图像各自的参数（角度/透明度/缩放）相互独立、可分别调整：
     通过 opts["text"] 与 opts["image"] 两份独立字典传入，互不影响。
     当 kinds 同时含 text 与 image 时，文本与图像水印会同时叠加且各自使用自己的参数。
+
+    防去除加固（均可选，默认关闭，不改变原有外观）：
+    - opts["tile"]=True + tile_rows/tile_cols：改为平铺满页（对抗 PS/AI 修图去除）；
+    - opts["redundant"]=True：页眉之外也写进页脚，并用伪装显示名（对抗
+      Word/WPS“删除水印”按钮与按名字匹配的去水印脚本）。
     """
     document = Document(path)
     kinds = [k for k in kinds if k in ("text", "image")]
     text_opts = opts.get("text", {}) or {}
     image_opts = opts.get("image", {}) or {}
+    tile = bool(opts.get("tile", False))
+    tile_rows = int(opts.get("tile_rows", 4) or 4)
+    tile_cols = int(opts.get("tile_cols", 3) or 3)
+    redundant = bool(opts.get("redundant", False))
 
     # 准备各层水印图像：文本层覆盖约 0.85 页宽，图像层约 0.6 页宽
     prepared = []
@@ -419,27 +545,37 @@ def insert_watermark(path: str, kinds, **opts) -> dict:
     for section in document.sections:
         page_w = int(section.page_width)
         page_h = int(section.page_height)
-        for header in _iter_headers(document, section):
-            if header.part in processed_parts:
+        for part in _iter_parts(document, section, include_footers=redundant):
+            if part.part in processed_parts:
                 continue
-            processed_parts.add(header.part)
-            _remove_in_header(header)  # 先清本页眉所有本工具水印（replace 语义：仅保留本次所选类型）
+            processed_parts.add(part.part)
+            # 先清本 part 所有本工具水印（replace 语义：仅保留本次所选类型）
+            _remove_in_part(part)
             for (mark, png, nat_w, nat_h, base, angle, scale, offset_x, offset_y) in layers:
-                bio = BytesIO(png)
-                rId, img_part = header.part.get_or_add_image(bio)
-                disp_w = int(page_w * base * scale)
-                disp_h = int(disp_w * nat_h / nat_w) if nat_w else disp_w
-                # 居中基准 + 百分比偏移；offset 正=右/下，负=左/上
-                pos_x = page_w // 2 - disp_w // 2 + offset_x / 100.0 * page_w
-                pos_y = page_h // 2 - disp_h // 2 + offset_y / 100.0 * page_h
-                drawing = _make_drawing(rId, disp_w, disp_h, angle, mark, docpr_counter,
-                                       pos_x, pos_y)
-                docpr_counter += 1
-                _add_drawing_to_header(header, drawing)
-                inserted += 1
+                # 同一份 PNG 在同一 part 内会被复用（按内容哈希去重），平铺不会撑大文件
+                rId, img_part = part.part.get_or_add_image(BytesIO(png))
+                if tile:
+                    boxes = tile_layout(page_w, page_h, nat_w, nat_h,
+                                        tile_rows, tile_cols, scale, offset_x, offset_y)
+                else:
+                    disp_w = page_w * base * scale
+                    disp_h = disp_w * nat_h / nat_w if nat_w else disp_w
+                    # 居中基准 + 百分比偏移；offset 正=右/下，负=左/上
+                    boxes = [(page_w / 2.0 - disp_w / 2.0 + offset_x / 100.0 * page_w,
+                              page_h / 2.0 - disp_h / 2.0 + offset_y / 100.0 * page_h,
+                              disp_w, disp_h)]
+                for (pos_x, pos_y, disp_w, disp_h) in boxes:
+                    # 加固时用伪装显示名，私有标记放 descr（不影响本工具识别/清除）
+                    disp_name = decoy_name(docpr_counter) if redundant else mark
+                    drawing = _make_drawing(rId, int(disp_w), int(disp_h), angle,
+                                            disp_name, mark, docpr_counter, pos_x, pos_y)
+                    docpr_counter += 1
+                    _add_drawing_to_part(part, drawing)
+                    inserted += 1
 
     document.save(path)
-    return {"ok": True, "engine": "docx", "inserted": inserted, "kinds": kinds}
+    return {"ok": True, "engine": "docx", "inserted": inserted, "kinds": kinds,
+            "tile": tile, "redundant": redundant}
 
 
 def clear_watermark(path: str) -> dict:
@@ -451,11 +587,12 @@ def clear_watermark(path: str) -> dict:
     removed = 0
     processed_parts = set()
     for section in document.sections:
-        for header in _iter_headers(document, section):
-            if header.part in processed_parts:
+        # 始终扫描页脚：加固模式下水印也会写进页脚，否则会清不干净
+        for part in _iter_parts(document, section, include_footers=True):
+            if part.part in processed_parts:
                 continue
-            processed_parts.add(header.part)
-            removed += _remove_in_header(header, clear_any=True)  # 清掉所有水印类图形
+            processed_parts.add(part.part)
+            removed += _remove_in_part(part, clear_any=True)  # 清掉所有水印类图形
     document.save(path)
     return {"ok": True, "engine": "docx", "removed": removed}
 
@@ -463,3 +600,9 @@ def clear_watermark(path: str) -> dict:
 def has_watermark(path: str) -> bool:
     document = Document(path)
     return _has_watermark_in_doc(document)
+
+
+def count_watermarks(path: str) -> int:
+    """返回本工具添加的水印图形份数（守护按“份数”判断是否被删过）。"""
+    document = Document(path)
+    return _count_marks_in_doc(document)

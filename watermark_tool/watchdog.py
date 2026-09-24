@@ -19,20 +19,37 @@ def _default_log(msg, verbose=False):
 
 
 class WatermarkWatchdog:
-    def __init__(self, src_path, output_path, kinds, opts, interval=1.0, log=_default_log):
+    def __init__(self, src_path, output_path, kinds, opts, interval=1.0, log=_default_log,
+                 expected=None):
+        """expected：期望的水印份数（平铺/冗余模式下一次会写入很多份）。
+
+        只查“有没有水印”对加固模式是不够的——别人删掉其中一部分照样能过。
+        给出 expected 后，守护会按份数校验，少几份就整体补齐。
+        """
         self.src_path = os.path.abspath(src_path)
         self.output_path = os.path.abspath(output_path)
         self.kinds = list(kinds)
         self.opts = opts
         self.interval = max(0.2, float(interval))
         self.log = log
+        self.expected = int(expected) if expected else None
         self._stop = threading.Event()
         self._thread = None
         self.running = False
 
+    def _reinsert(self):
+        """从原文件重新生成/补齐水印，并同步期望份数。"""
+        res = core.insert_watermark(self.src_path, self.kinds,
+                                    output_path=self.output_path, **self.opts)
+        if isinstance(res, dict) and res.get("inserted"):
+            self.expected = int(res["inserted"])
+        return res
+
     def _loop(self):
         self.running = True
-        self.log(f"守护已启动：每 {self.interval:.1f}s 检查一次水印（监控 {os.path.basename(self.output_path)}）。")
+        extra = f"，按 {self.expected} 份校验" if self.expected else ""
+        self.log(f"守护已启动：每 {self.interval:.1f}s 检查一次水印"
+                 f"（监控 {os.path.basename(self.output_path)}{extra}）。")
         was_locked = None
         while not self._stop.is_set():
             try:
@@ -49,15 +66,19 @@ class WatermarkWatchdog:
                     if not os.path.exists(self.output_path):
                         # 输出文件被整个删除（不只是水印被删）：直接从原文件重新生成并加水印。
                         # 此前这里会走 has_watermark 抛“Package not found”，导致只报错、永不补回。
-                        core.insert_watermark(self.src_path, self.kinds,
-                                              output_path=self.output_path, **self.opts)
+                        self._reinsert()
                         self.log("⚠ 输出文件已被删除，已自动从原文件重新生成并加水印。")
-                    elif not core.has_watermark(self.output_path):
-                        core.insert_watermark(self.src_path, self.kinds,
-                                              output_path=self.output_path, **self.opts)
-                        self.log("⚠ 检测到水印被移除，已自动从原文件补回。")
                     else:
-                        self.log("· 水印在位。", verbose=True)
+                        cnt = core.watermark_count(self.output_path)
+                        if cnt == 0:
+                            self._reinsert()
+                            self.log("⚠ 检测到水印被移除，已自动从原文件补回。")
+                        elif self.expected and cnt < self.expected:
+                            # 加固模式下一次会写很多份：被删掉几份也要整体补齐
+                            self._reinsert()
+                            self.log(f"⚠ 检测到水印被部分移除（{cnt}/{self.expected} 份），已自动补齐。")
+                        else:
+                            self.log("· 水印在位。", verbose=True)
             except Exception as e:
                 self.log(f"守护检查出错: {e}")
             self._stop.wait(self.interval)

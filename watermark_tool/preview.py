@@ -14,18 +14,44 @@ from io import BytesIO
 
 from PIL import Image
 
-from .engine_docx import render_text_png, prepare_image_png, text_base
+from .engine_docx import render_text_png, prepare_image_png, text_base, tile_layout
 
 # A4 @ 96 DPI（像素），用于示意预览
 A4_W_PX = 794
 A4_H_PX = 1123
 
 
-def _draw_layer(page, wm, angle, scale, base, page_w, page_h, offset_x=0.0, offset_y=0.0):
+def _composite(page, layer, x, y):
+    """把 layer 混合到 page 的 (x, y) 处；越界部分自动裁剪，避免负坐标报错。"""
+    x = int(round(x))
+    y = int(round(y))
+    lx, ly = max(0, x), max(0, y)
+    rx, ry = min(page.width, x + layer.width), min(page.height, y + layer.height)
+    if rx <= lx or ry <= ly:
+        return
+    piece = layer.crop((lx - x, ly - y, rx - x, ry - y))
+    page.alpha_composite(piece, (lx, ly))
+
+
+def _draw_layer(page, wm, angle, scale, base, page_w, page_h, offset_x=0.0, offset_y=0.0,
+                tile=False, tile_rows=1, tile_cols=1):
     """把单层水印缩放、旋转、按偏移定位后，以透明度混合到 page（RGBA）上。
 
     offset_x/offset_y 为占页宽/页高的百分比（0=居中，正=右/下，负=左/上）。
+    tile=True 时按 rows×cols 网格平铺满页（与 engine_docx 的布局算法一致）。
     """
+    if tile:
+        # 平铺：每格一份，格内等比缩放；旋转后按格心对齐（与 Word 中观感一致）
+        boxes = tile_layout(page_w, page_h, wm.width, wm.height,
+                            tile_rows, tile_cols, scale, offset_x, offset_y)
+        for (bx, by, bw, bh) in boxes:
+            piece = wm.resize((max(1, int(bw)), max(1, int(bh))), Image.LANCZOS)
+            # 旋转：Word 正角度=顺时针，Pillow 正角度=逆时针，故取负
+            piece = piece.rotate(-angle, expand=True, resample=Image.BICUBIC)
+            _composite(page, piece, bx + bw / 2.0 - piece.width / 2.0,
+                       by + bh / 2.0 - piece.height / 2.0)
+        return
+
     disp_w = int(page_w * base * scale)
     ratio = wm.height / wm.width if wm.width else 1.0
     disp_h = int(disp_w * ratio)
@@ -34,9 +60,7 @@ def _draw_layer(page, wm, angle, scale, base, page_w, page_h, offset_x=0.0, offs
     wm = wm.rotate(-angle, expand=True, resample=Image.BICUBIC)
     cx = (page_w - wm.width) // 2 + offset_x / 100.0 * page_w
     cy = (page_h - wm.height) // 2 + offset_y / 100.0 * page_h
-    x = int(round(cx))
-    y = int(round(cy))
-    page.alpha_composite(wm, (x, y))
+    _composite(page, wm, cx, cy)
 
 
 def render_preview(opts: dict, kinds, page_w=A4_W_PX, page_h=A4_H_PX) -> Image.Image:
@@ -49,6 +73,10 @@ def render_preview(opts: dict, kinds, page_w=A4_W_PX, page_h=A4_H_PX) -> Image.I
     kinds = [k for k in kinds if k in ("text", "image")]
     text_opts = opts.get("text", {}) or {}
     image_opts = opts.get("image", {}) or {}
+    # 防去除加固：平铺满页（两类水印共用同一套网格参数）
+    tile = bool(opts.get("tile", False))
+    tile_rows = int(opts.get("tile_rows", 4) or 4)
+    tile_cols = int(opts.get("tile_cols", 3) or 3)
 
     page = Image.new("RGBA", (page_w, page_h), (255, 255, 255, 255))
 
@@ -68,7 +96,8 @@ def render_preview(opts: dict, kinds, page_w=A4_W_PX, page_h=A4_H_PX) -> Image.I
         wm = render_text_png(text, font_size, color, alpha, cn_font_name, latin_font_name)
         # 与 engine_docx 一致：基准覆盖比例由字号决定，再乘 scale
         base = text_base(font_size)
-        _draw_layer(page, wm, angle, scale, base, page_w, page_h, offset_x, offset_y)
+        _draw_layer(page, wm, angle, scale, base, page_w, page_h, offset_x, offset_y,
+                    tile=tile, tile_rows=tile_rows, tile_cols=tile_cols)
 
     if "image" in kinds:
         angle = float(image_opts.get("angle", 45))
@@ -81,7 +110,8 @@ def render_preview(opts: dict, kinds, page_w=A4_W_PX, page_h=A4_H_PX) -> Image.I
         if not image_path:
             raise ValueError("未选择水印图片")
         wm = prepare_image_png(image_path, alpha)
-        _draw_layer(page, wm, angle, scale, 0.6, page_w, page_h, offset_x, offset_y)
+        _draw_layer(page, wm, angle, scale, 0.6, page_w, page_h, offset_x, offset_y,
+                    tile=tile, tile_rows=tile_rows, tile_cols=tile_cols)
 
     if not kinds:
         raise ValueError("未启用任何水印（文本与图像均未启用）。")
