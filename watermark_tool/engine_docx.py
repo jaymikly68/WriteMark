@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 from io import BytesIO
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageColor, ImageDraw, ImageFont
 from docx import Document
 from docx.oxml.ns import qn
 from lxml import etree
@@ -142,6 +142,35 @@ def is_cjk(ch: str) -> bool:
             0xFF00 <= cp <= 0xFFEF)         # 半/全角形式区
 
 
+def parse_color(color) -> tuple[int, int, int]:
+    """把颜色入参统一成 (r, g, b)——兼容 (r,g,b) / "#RRGGBB" / "#RGB" / 颜色名。
+
+    必要性：以前直接写 r, g, b = color[0], color[1], color[2]，一旦有人按常见习惯传入
+    十六进制字符串 "#FF0000"，取到的会是字符 '#' / 'F' / 'F'，直到 Pillow 绘图时才抛
+    "TypeError: 'str' object cannot be interpreted as an integer"，非常难定位。
+    现在统一在这里兜住，非法入参回退为中性灰而不是崩溃。
+    """
+    if isinstance(color, str):
+        s = color.strip().lstrip("#")
+        if len(s) == 3:
+            s = "".join(ch * 2 for ch in s)
+        if len(s) >= 6:
+            try:
+                return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
+            except ValueError:
+                pass
+        try:
+            return tuple(int(v) for v in ImageColor.getrgb(color)[:3])
+        except Exception:
+            return (128, 128, 128)
+    try:
+        if len(color) >= 3:
+            return tuple(int(v) for v in color[:3])
+    except Exception:
+        pass
+    return (128, 128, 128)
+
+
 def render_text_png(text: str, font_size: int, color, alpha: int,
                     cn_font_name: str | None = None,
                     latin_font_name: str | None = None) -> Image.Image:
@@ -172,7 +201,7 @@ def render_text_png(text: str, font_size: int, color, alpha: int,
     latin_font = _load(latin_path)
     fallback_font = _load(fallback_path) if fallback_path else cn_font
 
-    r, g, b = color[0], color[1], color[2]
+    r, g, b = parse_color(color)
 
     # ---- 字形存在性判定（栅格化后与“缺字形”参照比较），用于二次兜底 ----
     def _glyph_bytes(font, ch):

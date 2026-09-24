@@ -20,7 +20,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 TITLE = "Word 一键水印工具"
 APP_EXE_NAME = "WriteMarkApp.exe"
-VERSION = "1.1.2"
+VERSION = "1.1.3"
 
 
 def runtime_root():

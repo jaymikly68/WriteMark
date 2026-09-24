@@ -40,13 +40,12 @@ def prepare_app_dir():
     """
     if not APP_DIR.exists():
         return
-    prev = APP_DIR.with_name(APP_DIR.name + ".prev")
-    if prev.exists():
-        shutil.rmtree(prev, ignore_errors=True)
-    if prev.exists():                       # 删不掉就换个名字，至少不覆盖
-        prev = APP_DIR.with_name(f"{APP_DIR.name}.prev{int(time.time())}")
+    # 全程只用 os.replace（重命名），**不做任何删除**：
+    # 批量删除上百个文件会被环境的安全策略拦下，那会让构建半途失败。
+    prev = APP_DIR.with_name(f"{APP_DIR.name}_prev_{time.strftime('%m%d_%H%M%S')}")
     os.replace(APP_DIR, prev)
     print(f"已把上一次的运行体改名为 {prev.name}（确保本轮全新构建）")
+    print("  注：这些 _prev_* 目录可随时手工删除，不影响任何功能。")
 
 
 def newest_source_mtime():
@@ -72,8 +71,8 @@ def build_payload():
         sys.exit(f"找不到 onedir 运行体：{APP_DIR}")
     check_freshness()
     PAYLOAD_DIR.mkdir(exist_ok=True)
-    if PAYLOAD_ZIP.exists():
-        PAYLOAD_ZIP.unlink()
+    # 注意：不要在这里 unlink 旧的 app_payload.zip。下文以 "w" 打开即等于覆盖写，
+    # 而"删除一个 50MB+ 文件"会被环境的批量删除保护拦下，导致构建半途失败。
     # zip 内部直接以 app 目录内容为根（不要多包一层 WriteMarkApp/），
     # 这样 runtime_dir() 本身就是应用目录，APP_EXE_NAME 就在它下面
     files = sorted(p for p in APP_DIR.rglob("*") if p.is_file())
@@ -97,13 +96,15 @@ def build_launcher():
     t0 = time.time()
     launcher_exe = HERE / "dist" / "WordWatermark.exe"
     if launcher_exe.exists() and _read_tail_marker(launcher_exe):
-        # 上一轮产物尾部已挂 payload：PyInstaller 会整个重写它，直接删更干净
-        try:
-            os.remove(launcher_exe)
-        except OSError:
-            pass
+        # 上一轮产物尾部已挂 payload：改个名挪走（PyInstaller 之后会重建同名 exe）。
+        # 不能在这里 os.remove —— 大文件的删除会被批量删除保护拦下。
+        old = launcher_exe.with_name(f"WordWatermark_prev_{time.strftime('%m%d_%H%M%S')}.exe")
+        os.replace(launcher_exe, old)
+        print(f"已移走上一版 exe：{old.name}")
+    # 同样用全新的工作目录，避免 PyInstaller 去批量删除 build/launcher 里的旧缓存
+    work = HERE / "build" / ("launcher_" + time.strftime("%Y%m%d_%H%M%S"))
     r = subprocess.run([sys.executable, "-m", "PyInstaller", "launcher.spec",
-                        "--noconfirm"], cwd=str(HERE))
+                        "--noconfirm", "--workpath", str(work)], cwd=str(HERE))
     if r.returncode != 0:
         sys.exit("PyInstaller 构建失败")
 
@@ -137,9 +138,14 @@ def build_launcher():
 def main():
     if "--skip-app" not in sys.argv:
         prepare_app_dir()
+        # 用**带时间戳的新工作目录**，而不是清理旧缓存（更不用 PyInstaller 的 --clean）：
+        # 两者都会批量删除 build/ 下数百个文件，会被环境安全策略拦下导致构建失败。
+        # 这样每次都是从零分析，效果等价，且完全不触发删除。
+        work = HERE / "build" / ("app_" + time.strftime("%Y%m%d_%H%M%S"))
+        print(f"PyInstaller 工作目录：build/{work.name}")
         r = subprocess.run([sys.executable, "-m", "PyInstaller",
-                            "WordWatermark_app.spec", "--noconfirm", "--clean"],
-                           cwd=str(HERE))
+                            "WordWatermark_app.spec", "--noconfirm",
+                            "--workpath", str(work)], cwd=str(HERE))
         if r.returncode != 0:
             sys.exit("运行体构建失败")
     build_payload()

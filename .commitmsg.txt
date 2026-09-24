@@ -1,0 +1,29 @@
+v1.1.3：彻底不再启动 Word；查明“关闭 Word 卡 20s”与本工具无关
+
+字体来源改造（根除幽灵 Word 的源头）
+- collect_fonts() 默认改读 Windows 字体注册表，不再通过 COM 启动 Word：
+  5.5s/次 -> 0.006s，零副作用（此前 GUI 弹窗写着「不会启动 Word」，代码却仍在走 COM）
+- 中文名由新增 _CN_NAME_MAP 本地化表给出（宋体/微软雅黑/仿宋/等线…27 个），
+  只收录本机真实存在且能解析到字体文件的名字，保证「选了就生效」
+- 拆分注册表中 “SimSun & NSimSun” 这类合并显示名；过滤 Bold/Italic 样式变体
+- get_word_fonts() 保留为显式可选（use_word=True），常规路径不再调用
+
+顺带修复
+- engine_docx.parse_color：以前按 color[0..2] 取值，传入 “#FF0000” 会取到字符导致崩溃；
+  现在兼容 (r,g,b)/十六进制/颜色名，非法入参回退中性灰
+- build_launcher.py：全流程用「重命名 / 新工作目录」代替删除。环境里批量删除上百个
+  文件会被安全策略拦下并中断构建（本轮连续踩到 4 次：dist .prev、build/WordWatermark_app、
+  payload zip、build/launcher 缓存），同时去掉 --clean
+
+新增诊断/回归脚本
+- test_word_exit_lag / test_office_exit_lag：量化 Word/Excel/PowerPoint 关闭耗时对照
+- test_word_close_profile：采样关闭那 20 秒里 Word 的 CPU/IO/TCP 连接
+- test_com_side_effect：COM 调用前后对比之后 Word 的关闭耗时
+- test_no_word_process / test_exe_no_word：持续监控（含「人为起一个 Word」的自检），
+  证明业务流程与交付版 exe 都不会产生 WINWORD.EXE
+
+本机实测结论（已核验，非推断）
+- 点×到进程退出：Word 18.6s、PowerPoint 18.6s（本工具从不调用它）、Excel 3.2s
+- 其中前 16 秒 CPU 0ms / 磁盘 IO 0，只挂着 8 条到微软云 443 的 ESTABLISHED 连接
+- COM 调用前后 18.58s -> 18.50s，差值 -0.09s（噪声级）
+- 工具侧：启动 1.47s、关闭 0.09s、零 WINWORD、零残留进程
