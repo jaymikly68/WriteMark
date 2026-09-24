@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+
+# 虚拟环境（体积巨大，不入仓）
+venv/
+.venv/
+
+# PyInstaller 中间产物与打包输出
+build/
+dist/
+*.manifest
+
+# 历史版本 exe：体积大（每个约 70MB），一律以 GitHub Release 附件归档，
+# 不进 git 历史（否则仓库会膨胀到数百 MB、克隆极慢）
+build_backups/
+*.exe
+
+# 测试/临时产物
+.pytest_cache/
+*.log
+_test_*/
