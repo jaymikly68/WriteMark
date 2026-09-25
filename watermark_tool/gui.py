@@ -34,8 +34,16 @@ except Exception:  # pragma: no cover
 try:  # 视频水印：imageio + imageio-ffmpeg（自带 ffmpeg 二进制）；缺了则视频页不可用但不拖垮整GUI
     from . import video as video_mod
     import imageio_ffmpeg  # noqa: F401  确保 ffmpeg 二进制可被打包收集
-except Exception:  # pragma: no cover
+except Exception as _video_err:  # pragma: no cover
     video_mod = None
+    # 把真实原因记下来：冻结环境里视频功能失效时，日志一看便知缺了什么
+    try:
+        import tempfile as _tf, traceback as _tb
+        with open(os.path.join(_tf.gettempdir(), "WriteMark_video_import_err.log"),
+                  "w", encoding="utf-8") as _f:
+            _f.write("".join(_tb.format_exception(_video_err)))
+    except Exception:
+        pass
 
 
 class Worker(QThread):
