@@ -335,6 +335,15 @@ class App(QMainWindow):
         self.out_edit = QLineEdit(); self.out_edit.setPlaceholderText("默认保存到桌面/<原名>WaterMark.docx，可点击浏览修改")
         ho.addWidget(self.out_edit, 3)
         bout = QPushButton("浏览..."); bout.clicked.connect(self._browse_output); ho.addWidget(bout, 1)
+        # Word 主操作按钮并入 Word 区域：原先独占一整行时各占半宽、视觉上过大，
+        # 且和下面的视频区块割裂。现在紧跟在输出字段右侧，尺寸按内容自然收缩。
+        self._btn_insert = QPushButton("一键插入水印"); self._btn_insert.clicked.connect(self._insert)
+        self._btn_insert.setStyleSheet(BTN_HL); self._btn_insert.setFixedWidth(104)
+        ho.addWidget(self._btn_insert)
+        self._btn_clear = QPushButton("一键清除水印"); self._btn_clear.clicked.connect(self._clear)
+        self._btn_clear.setStyleSheet(BTN_HL); self._btn_clear.setFixedWidth(104)
+        ho.addWidget(self._btn_clear)
+        ho.addStretch(1)
         root.addWidget(f_out)
         self.out_edit.textChanged.connect(self._on_output_changed)
 
@@ -461,12 +470,7 @@ class App(QMainWindow):
         root.addLayout(h_types)
 
         # ---------------- 按钮（插入/清除设为蓝底黑字高亮，突出主操作）----------------
-        hb = QHBoxLayout()
-        self._btn_insert = QPushButton("一键插入水印"); self._btn_insert.clicked.connect(self._insert)
-        self._btn_insert.setStyleSheet(BTN_HL); hb.addWidget(self._btn_insert)
-        self._btn_clear = QPushButton("一键清除水印"); self._btn_clear.clicked.connect(self._clear)
-        self._btn_clear.setStyleSheet(BTN_HL); hb.addWidget(self._btn_clear)
-        root.addLayout(hb)
+        # 主操作按钮已并入上方 Word 区域（输出字段右侧），这里不再单独占一行
 
         # ---------------- 防去除加固（可选）
         f_hard = self._make_group("防去除加固（让水印更难被删掉）")
@@ -1767,6 +1771,55 @@ def _run_elevated(mode):
     return 0 if ok else 1
 
 
+SINGLE_INSTANCE_NAME = "WordWatermarkSingleInstance"
+
+
+def _bring_window_up(win):
+    """把已在跑的那个实例的窗口从托盘/最小化状态唤出来。"""
+    try:
+        win.showNormal()
+    except Exception:
+        pass
+    win.show()
+    win.raise_()
+    win.activateWindow()
+
+
+def _acquire_single_instance():
+    """本机只允许一个实例常驻（否则会同时存在多个后台守护，互相抢着补水印）。
+
+    返回 (QLocalServer | None, should_exit)：
+      - 已有实例在跑 → 通知它把窗口唤出，本实例直接退出；
+      - 抢到服务      → 返回 server，自己就是那个唯一实例；
+      - QtNetwork 缺失或双方都失败 → 返回 (None, False)，宁可多开一个也
+        不能让程序打不开。
+    """
+    try:
+        from PySide6.QtNetwork import QLocalServer, QLocalSocket
+    except Exception:
+        return None, False
+
+    # 先探测已有实例（本机实测：无实例/有实例都只要 0.1ms，不会拖慢启动）。
+    # 不能反过来用 listen 结果判断——Windows 命名管道允许多实例同时 listen
+    # 同名，第二次 listen 照样成功，那样会重复起出一个主实例。
+    sock = QLocalSocket()
+    sock.connectToServer(SINGLE_INSTANCE_NAME)
+    woke = sock.waitForConnected(300)
+    if woke:                               # 已有实例在跑，通知它把窗口唤出来
+        sock.write(b"show")
+        sock.waitForBytesWritten(500)
+    sock.disconnectFromServer()
+    if woke:
+        return None, True
+
+    # 没人应答 = 没有实例，也可能留了空壳记录；清掉后自己成为那一个
+    QLocalServer.removeServer(SINGLE_INSTANCE_NAME)
+    server = QLocalServer()
+    if server.listen(SINGLE_INSTANCE_NAME):
+        return server, False
+    return None, False                     # 连不上又抢不到：宁可多开，也不能打不开
+
+
 def main():
     # 提权后的那一趟：不做界面，只执行完把结果交给父进程读取
     if "--office-fix" in sys.argv or "--office-revert" in sys.argv:
@@ -1777,7 +1830,15 @@ def main():
     # 关闭/隐藏主窗口不应自动结束进程：后台守护模式下窗口是隐藏的，
     # 若保持默认 True，隐藏窗口可能会被判为“最后一个窗口已关闭”而连带退出应用。
     app.setQuitOnLastWindowClosed(False)
+
+    server, already_running = _acquire_single_instance()
+    if already_running:
+        # 已有实例在跑：只把它唤出来，本实例不重复起后台
+        return 0
+
     win = App()
+    if server is not None:
+        server.newConnection.connect(lambda: _bring_window_up(win))
     win.show()
     app.exec()
     return 0
