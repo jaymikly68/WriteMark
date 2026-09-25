@@ -200,7 +200,8 @@ def _resolve_out_size(opts: dict, src_w: int, src_h: int) -> tuple[int, int]:
 
 
 def add_video_watermark(src: str, output: str, opts: dict,
-                        progress_fn=None, stop_check=None) -> dict:
+                        progress_fn=None, stop_check=None,
+                        max_seconds=None) -> dict:
     """
     给视频逐帧加水印。
 
@@ -318,6 +319,9 @@ def add_video_watermark(src: str, output: str, opts: dict,
                     img.alpha_composite(layer, (x, y))
             writer.append_data(np.asarray(img.convert("RGB")))
             frame_idx += 1
+            # 短片预览：只处理前 max_seconds 秒，到时长即停（用于“播放短片预览”）
+            if max_seconds and frame_idx / out_fps >= max_seconds:
+                break
             if progress_fn is not None and total:
                 progress_fn(frame_idx, total)
     finally:
@@ -379,3 +383,90 @@ def watermark_video_formats() -> list:
     """列出本工具支持的常见输入视频格式（ffmpeg 解码，基本覆盖主流格式）。"""
     return [".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm",
             ".mpeg", ".mpg", ".ts", ".m4v", ".3gp", ".vob"]
+
+
+# ---------------------------------------------------------------------------
+# 预览：单帧叠水印（用于 GUI 实时预览 / 拖拽定位），不落盘、不重编码
+# ---------------------------------------------------------------------------
+def grab_raw_frame(src: str, opts: dict, t_sec: float = 1.0) -> Image.Image:
+    """读取源视频在 t_sec 处的单帧（已按导出分辨率规整），返回 PIL RGB，用于预览。"""
+    if not os.path.exists(src):
+        raise FileNotFoundError(f"视频不存在: {src}")
+    try:
+        reader = iio.get_reader(src, "ffmpeg")
+        meta = reader.get_meta_data()
+    except Exception as e:
+        raise RuntimeError(f"无法读取该视频（可能格式不支持或文件损坏）：{e}")
+    fps = float(meta.get("fps", 25) or 25)
+    if fps <= 0:
+        fps = 25.0
+    try:
+        W, H = meta["size"]
+    except Exception:
+        W, H = 1280, 720
+    W, H = _resolve_out_size(opts, W, H)
+    target = max(0, int(round(t_sec * fps)))
+    frame = None
+    try:
+        for i, f in enumerate(reader):
+            if i >= target:
+                frame = f
+                break
+        else:
+            frame = f           # 视频短于 t_sec：用最后一帧
+    finally:
+        try:
+            reader.close()
+        except Exception:
+            pass
+    if frame is None:
+        raise RuntimeError("无法从视频中读取到任何帧。")
+    img = Image.fromarray(np.asarray(frame)).convert("RGBA")
+    if img.size != (W, H):
+        img = img.resize((W, H), Image.LANCZOS)
+    return img.convert("RGB")
+
+
+def compose_on_frame(raw, opts: dict, t_sec: float = 0.0) -> Image.Image:
+    """在已读取的 RGB 帧上叠加当前水印，返回带水印的 PIL RGB 图（用于实时预览）。
+
+    与 add_video_watermark 逐帧合成逻辑一致；t_sec 仅用于滚动水印在该时刻的位置，
+    因此预览里的滚动水印与实际导出在 t_sec 处的位置相同。
+    """
+    rgb = raw.convert("RGBA")
+    W, H = rgb.size
+    kinds = [k for k in opts.get("kinds", ["text", "image"]) if k in ("text", "image")]
+    if not kinds:
+        raise ValueError("未启用任何水印类型。")
+    text_cfg = opts.get("text", {}) or {}
+    image_cfg = opts.get("image", {}) or {}
+    layers = _layer_specs(W, H, kinds, text_cfg, image_cfg)
+    if not layers:
+        raise ValueError("文字为空且未提供有效图片，无法生成水印。")
+    motions = _normalize_motion(opts.get("motion", opts.get("mode", "fixed"))) or ["fixed"]
+    scroll_speed = float(opts.get("scroll_speed", 0.12) or 0.12)
+    if scroll_speed <= 0:
+        scroll_speed = 0.12
+    for spec in layers:
+        cfg = text_cfg if spec["kind"] == "text" else image_cfg
+        per_type = _normalize_motion(cfg.get("motion"))
+        spec_motions = per_type or list(motions)
+        painted = set()
+        lw, lh = spec["img"].size
+        pos = spec.get("position")
+        for motion in spec_motions:
+            if motion == "scroll":
+                x, y = _scroll_pos(lw, lh, W, H, pos, t_sec, scroll_speed)
+            else:
+                x, y = _fixed_pos(lw, lh, W, H, pos)
+            if (x, y) in painted:
+                continue
+            painted.add((x, y))
+            rgb.alpha_composite(spec["img"], (x, y))
+    return rgb.convert("RGB")
+
+
+def compose_frame(src: str, opts: dict, t_sec: float = 1.0) -> Image.Image:
+    """便捷封装：读帧 + 叠水印，返回带水印的预览图。"""
+    raw = grab_raw_frame(src, opts, t_sec)
+    return compose_on_frame(raw, opts, t_sec)

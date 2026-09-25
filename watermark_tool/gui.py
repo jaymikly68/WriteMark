@@ -14,6 +14,7 @@ PySide6 (Qt) 一键 GUI：选择 Word 文件 → 设置文本/图像水印 → �
 from __future__ import annotations
 
 import os
+import io
 import tempfile
 import sys
 import threading
@@ -25,8 +26,8 @@ from PySide6.QtWidgets import (
     QScrollArea, QSystemTrayIcon, QMenu, QStyle, QProgressBar,
     QButtonGroup, QRadioButton, QSizePolicy,
 )
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QStringListModel, QEvent
-from PySide6.QtGui import QColor, QImage, QPixmap, QIntValidator
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QStringListModel, QEvent, QRect, QPointF
+from PySide6.QtGui import QColor, QImage, QPixmap, QIntValidator, QPainter, QPen
 
 from . import core, watchdog, preview, word_fonts, engine_docx
 try:  # office_tweak 只依赖标准库，任何情况下缺了也不该拖垮整GUI
@@ -107,11 +108,24 @@ class _ProportionalButton(QPushButton):
 
 # 视频水印锚点：位置名 -> (左上角相对帧的比例, 0..1)
 # 文字与图片各有独立一份，二者可错开，避免同时固定时完全重叠。
+# "自定义" 由右侧 X/Y 百分比输入决定（拖拽预览帧亦会写入 X/Y）。
 _V_POSITIONS = {
     "右下": (0.82, 0.85), "右上": (0.82, 0.08), "左下": (0.08, 0.85),
-    "左上": (0.08, 0.08), "居中": (0.35, 0.40),
+    "左上": (0.08, 0.08), "居中": (0.35, 0.40), "自定义": None,
 }
 _V_POSITIONS_KEYS = list(_V_POSITIONS.keys())
+
+# Word 水印位置预设：名称 -> (水平偏移%, 垂直偏移%)
+# 偏移以页面中心为 0，取值 -50~50（对应 X/Y 百分比 0~100，50=居中）。
+# "自定义" 表示直接由水平/垂直偏移滑块（或预览拖拽）决定，不做覆盖。
+_W_POS_PRESETS = {
+    "居中": (0.0, 0.0),
+    "左上": (-35.0, -40.0), "上中": (0.0, -40.0), "右上": (35.0, -40.0),
+    "中左": (-35.0, 0.0),                         "中右": (35.0, 0.0),
+    "左下": (-35.0, 40.0),  "下中": (0.0, 40.0),  "右下": (35.0, 40.0),
+    "自定义": None,
+}
+_W_POS_KEYS = list(_W_POS_PRESETS.keys())
 
 # 播放方式 -> 引擎 motion 值（"跟随" 表示沿用全局单选）
 _V_MOTION_MAP = {
@@ -255,28 +269,121 @@ class VideoWorker(QThread):
     result_signal = Signal(bool, str)
     progress_signal = Signal(int, int)   # (当前帧, 总帧数)
 
-    def __init__(self, src, output, opts):
+    def __init__(self, src, output, opts, max_seconds=None):
         super().__init__()
         self.src = src
         self.output = output
         self.opts = opts
+        self.max_seconds = max_seconds
         self._stop = False
 
     def request_stop(self):
         self._stop = True
 
     def run(self):
-        try:
+        try:  # 注意 max_seconds=None 时退化为处理整段视频，与旧行为完全一致
             res = video_mod.add_video_watermark(
                 self.src, self.output, self.opts,
                 # 兜底：进度值强制为安全 int（极端元数据下可能传进非有限值）
                 progress_fn=lambda c, t: self.progress_signal.emit(
                     int(c), int(t) if isinstance(t, (int, float)) and t == t and t > 0 else 0),
                 stop_check=lambda: self._stop,
+                max_seconds=self.max_seconds,
             )
             self.result_signal.emit(True, str(res))
         except Exception as e:
             self.result_signal.emit(False, str(e))
+
+
+class _DragLabel(QLabel):
+    """可拖拽定位的预览标签：在显示的图像上按下/拖动，发射归一化坐标 (fx, fy)∈[0,1]，
+    并绘制一个位置标记。供 Word 预览与视频预览帧共用，实现“拖拽自定义水印位置”。
+
+    图像按 KeepAspectRatio 居中显示，鼠标坐标会换算回图像内容占比，避免黑边干扰。
+    """
+
+    dragged = Signal(float, float)   # (fx, fy)：水印中心在图像中的归一化位置
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._base = QPixmap()
+        self._img_rect = QRect()
+        self._marker = None           # QPointF（图像内归一化坐标），None 时不画
+        self.setMouseTracking(True)
+        self.setAlignment(Qt.AlignCenter)
+
+    # ---- 外部接口 ----
+    def setBasePixmap(self, pix):
+        self._base = pix if pix is not None else QPixmap()
+        # 换图时保留标记（拖拽过程中会重新合成，标记仍代表当前位置）
+        self.update()
+
+    def clearImage(self):
+        self._base = QPixmap()
+        self._marker = None
+        self.update()
+
+    def setMarker(self, fx, fy):
+        self._marker = QPointF(max(0.0, min(1.0, fx)), max(0.0, min(1.0, fy)))
+        self.update()
+
+    def clearMarker(self):
+        self._marker = None
+        self.update()
+
+    def hasImage(self):
+        return not self._base.isNull()
+
+    # ---- 内部 ----
+    def _compute_rect(self):
+        if self._base.isNull():
+            self._img_rect = QRect()
+            return
+        ts = self._base.size().scaled(self.size(), Qt.KeepAspectRatio)
+        x = (self.width() - ts.width()) // 2
+        y = (self.height() - ts.height()) // 2
+        self._img_rect = QRect(x, y, ts.width(), ts.height())
+
+    def paintEvent(self, ev):
+        super().paintEvent(ev)
+        if self._base.isNull():
+            return
+        self._compute_rect()
+        p = QPainter(self)
+        p.drawPixmap(self._img_rect, self._base)
+        if self._marker is not None:
+            mx = self._img_rect.x() + self._marker.x() * self._img_rect.width()
+            my = self._img_rect.y() + self._marker.y() * self._img_rect.height()
+            r = max(8, int(min(self._img_rect.width(), self._img_rect.height()) * 0.06))
+            pen = QPen(QColor(225, 6, 0)); pen.setWidth(3)
+            p.setPen(pen)
+            p.drawEllipse(QPointF(mx, my), r, r)
+            p.drawLine(QPointF(mx - r, my), QPointF(mx + r, my))
+            p.drawLine(QPointF(mx, my - r), QPointF(mx, my + r))
+        p.end()
+
+    def _frac(self, pos):
+        if self._img_rect.isNull() or self._img_rect.width() == 0:
+            return None
+        fx = (pos.x() - self._img_rect.x()) / self._img_rect.width()
+        fy = (pos.y() - self._img_rect.y()) / self._img_rect.height()
+        return max(0.0, min(1.0, fx)), max(0.0, min(1.0, fy))
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.LeftButton and self.hasImage():
+            f = self._frac(ev.pos())
+            if f:
+                self.setMarker(*f)
+                self.dragged.emit(f[0], f[1])
+        super().mousePressEvent(ev)
+
+    def mouseMoveEvent(self, ev):
+        if (ev.buttons() & Qt.LeftButton) and self.hasImage():
+            f = self._frac(ev.pos())
+            if f:
+                self.setMarker(*f)
+                self.dragged.emit(f[0], f[1])
+        super().mouseMoveEvent(ev)
 
 
 class App(QMainWindow):
@@ -305,6 +412,8 @@ class App(QMainWindow):
         self.text_scale = 1.0
         self.text_offset_x = 0.0          # 水平偏移（占页宽百分比，0=居中）
         self.text_offset_y = 0.0          # 垂直偏移（占页高百分比，0=居中）
+        # 位置预设联动：写入偏移时屏蔽「改偏移→自动切自定义」的回环
+        self._pos_applying = False
         # 图像水印专属参数
         self.img_angle = 45.0
         self.img_transparency = 0.5
@@ -435,7 +544,19 @@ class App(QMainWindow):
         self.text_scale_spin.valueChanged.connect(self._schedule_preview)
         row.addWidget(self.text_scale_spin, 1)
         vt.addLayout(row)
+        # 位置预设：九宫格一键落位；手动改偏移或在预览图上拖拽会自动切到「自定义」
+        row = QHBoxLayout(); row.addWidget(QLabel("位置:"))
+        self.text_pos_combo = QComboBox()
+        self.text_pos_combo.addItems(_W_POS_KEYS)
+        self.text_pos_combo.setCurrentText("居中")
+        self.text_pos_combo.setToolTip(
+            "九宫格预设位置（左上/上中/右上 … 右下）。\n"
+            "手动调整下方偏移，或在预览图上拖拽水印，会自动切到「自定义」。")
+        self.text_pos_combo.currentTextChanged.connect(self._on_text_pos_preset)
+        row.addWidget(self.text_pos_combo, 1)
+        vt.addLayout(row)
         # 文本水印专属：水平/垂直偏移（支持上下左右调整，占页宽/页高百分比）
+        # 这同时也是「自定义位置」的精确输入：X=50+水平偏移，Y=50+垂直偏移
         row, self.text_offx_slider, self.text_offx_spin = self._make_slider_spin(
             "水平偏移(%):", -50, 50, self.text_offset_x, 2, 1.0, "%", self._on_text_offx)
         vt.addLayout(row)
@@ -443,7 +564,7 @@ class App(QMainWindow):
             "垂直偏移(%):", -50, 50, self.text_offset_y, 2, 1.0, "%", self._on_text_offy)
         vt.addLayout(row)
         for w in (self.text_edit, self.cn_font_combo, self.latin_font_combo,
-                  self.font_spin, self.color_btn,
+                  self.font_spin, self.color_btn, self.text_pos_combo,
                   self.text_angle_slider, self.text_angle_spin,
                   self.text_trans_slider, self.text_trans_spin, self.text_scale_spin,
                   self.text_offx_slider, self.text_offx_spin,
@@ -484,6 +605,17 @@ class App(QMainWindow):
         self.img_scale_spin.valueChanged.connect(self._schedule_preview)
         row.addWidget(self.img_scale_spin, 1)
         vi.addLayout(row)
+        # 位置预设：九宫格一键落位；手动改偏移或在预览图上拖拽会自动切到「自定义」
+        row = QHBoxLayout(); row.addWidget(QLabel("位置:"))
+        self.img_pos_combo = QComboBox()
+        self.img_pos_combo.addItems(_W_POS_KEYS)
+        self.img_pos_combo.setCurrentText("居中")
+        self.img_pos_combo.setToolTip(
+            "九宫格预设位置（左上/上中/右上 … 右下）。\n"
+            "手动调整下方偏移，或在预览图上拖拽水印，会自动切到「自定义」。")
+        self.img_pos_combo.currentTextChanged.connect(self._on_img_pos_preset)
+        row.addWidget(self.img_pos_combo, 1)
+        vi.addLayout(row)
         # 图像水印专属：水平/垂直偏移（支持上下左右调整，占页宽/页高百分比）
         row, self.img_offx_slider, self.img_offx_spin = self._make_slider_spin(
             "水平偏移(%):", -50, 50, self.img_offset_x, 2, 1.0, "%", self._on_img_offx)
@@ -491,7 +623,8 @@ class App(QMainWindow):
         row, self.img_offy_slider, self.img_offy_spin = self._make_slider_spin(
             "垂直偏移(%):", -50, 50, self.img_offset_y, 2, 1.0, "%", self._on_img_offy)
         vi.addLayout(row)
-        for w in (self.img_angle_slider, self.img_angle_spin,
+        for w in (self.img_pos_combo,
+                  self.img_angle_slider, self.img_angle_spin,
                   self.img_trans_slider, self.img_trans_spin, self.img_scale_spin,
                   self.img_offx_slider, self.img_offx_spin,
                   self.img_offy_slider, self.img_offy_spin):
@@ -590,10 +723,16 @@ class App(QMainWindow):
         # 预览
         f_prev = self._make_group("水印预览（示意，脱离 Word 直接查看）")
         vp = f_prev.layout()
-        self.preview_label = QLabel(); self.preview_label.setAlignment(Qt.AlignCenter)
+        self.preview_label = _DragLabel(); self.preview_label.setAlignment(Qt.AlignCenter)
         self.preview_label.setMinimumSize(230, 326)
         self.preview_label.setStyleSheet("border:1px solid #bbb; background:#fafafa;")
+        self.preview_label.setText("预览不可用")
+        self.preview_label.dragged.connect(self._on_preview_drag)
         vp.addWidget(self.preview_label)
+        self.preview_drag_chk = QCheckBox("拖拽自定义位置（在预览图上拖动水印）")
+        self.preview_drag_chk.setToolTip("勾选后，可直接在预览图上用鼠标把水印拖到任意位置；"
+                                         "放开后水平/垂直偏移会同步更新。")
+        vp.addWidget(self.preview_drag_chk)
         hprev = QHBoxLayout()
         bp = QPushButton("预览水印"); bp.clicked.connect(self._render_preview); hprev.addWidget(bp)
         bps = QPushButton("保存预览图"); bps.clicked.connect(self._save_preview); hprev.addWidget(bps)
@@ -769,22 +908,48 @@ class App(QMainWindow):
         self.v_img_motion_combo.currentTextChanged.connect(self._v_refresh_motion_ui)
         self._v_refresh_motion_ui()   # 建完控件后再刷一次，保证初始态正确
 
-        # 位置 / 速度：文字与图片各自一个锚点，避免同位置完全重叠
+        # 位置 / 速度：文字与图片各自一个锚点，避免同位置完全重叠。
+        # X/Y 为「水印左上角相对画面」的百分比（0,0=左上角；100,100=右下角外），
+        # 选预设会把 X/Y 回填，手改 X/Y 或在预览帧上拖拽会自动切到「自定义」。
+        self._v_pos_applying = False
         hp = QHBoxLayout()
         hp.addWidget(QLabel("文字位置:"))
         self.v_text_pos_combo = QComboBox()
         self.v_text_pos_combo.addItems(_V_POSITIONS_KEYS)
         self.v_text_pos_combo.setCurrentText("右下")
+        self.v_text_pos_combo.setToolTip("预设锚点；选「自定义」后以右侧 X/Y 百分比为准")
         hp.addWidget(self.v_text_pos_combo)
+        hp.addWidget(QLabel("X%:"))
+        self.v_text_x_spin = self._v_make_xy_spin(82)
+        hp.addWidget(self.v_text_x_spin)
+        hp.addWidget(QLabel("Y%:"))
+        self.v_text_y_spin = self._v_make_xy_spin(85)
+        hp.addWidget(self.v_text_y_spin)
+        hp.addSpacing(10)
         hp.addWidget(QLabel("图片位置:"))
         self.v_img_pos_combo = QComboBox()
         self.v_img_pos_combo.addItems(_V_POSITIONS_KEYS)
         self.v_img_pos_combo.setCurrentText("左下")   # 与文字错位，默认不打架
+        self.v_img_pos_combo.setToolTip("预设锚点；选「自定义」后以右侧 X/Y 百分比为准")
         hp.addWidget(self.v_img_pos_combo)
+        hp.addWidget(QLabel("X%:"))
+        self.v_img_x_spin = self._v_make_xy_spin(8)
+        hp.addWidget(self.v_img_x_spin)
+        hp.addWidget(QLabel("Y%:"))
+        self.v_img_y_spin = self._v_make_xy_spin(85)
+        hp.addWidget(self.v_img_y_spin)
+        hp.addSpacing(10)
         hp.addWidget(QLabel("滚动速度:"))
         hp.addWidget(self.v_speed_spin)
         hp.addStretch(1)
         v.addLayout(hp)
+        # 预设 ↔ X/Y 双向联动
+        self.v_text_pos_combo.currentTextChanged.connect(self._v_on_text_preset)
+        self.v_img_pos_combo.currentTextChanged.connect(self._v_on_img_preset)
+        for sp in (self.v_text_x_spin, self.v_text_y_spin):
+            sp.valueChanged.connect(self._v_on_text_xy)
+        for sp in (self.v_img_x_spin, self.v_img_y_spin):
+            sp.valueChanged.connect(self._v_on_img_xy)
 
         # 导出规格：分辨率 / 帧率（+自定义）/ 画质
         hs = QHBoxLayout()
@@ -827,6 +992,73 @@ class App(QMainWindow):
         hs.addStretch(1)
         v.addLayout(hs)
 
+        # ---------------- 预览（拖拽可自定义位置 / 可播放短片） ----------------
+        f_vprev = self._make_group("视频水印预览（改参数即时重绘 / 拖拽自定义位置）")
+        vpv = f_vprev.layout()
+        vpv.setSpacing(6)
+        self.v_custom_pos = None          # 拖拽自定义位置（图像归一化 fx,fy）
+        self._v_last_frame = None        # 抓取到的原始帧（PIL RGB），用于实时重绘
+        self._v_preview_out = ""
+        self.v_frame_label = _DragLabel()
+        self.v_frame_label.setMinimumSize(360, 203)
+        self.v_frame_label.setStyleSheet("border:1px solid #bbb; background:#222;")
+        self.v_frame_label.setText("点“预览水印效果”即可查看（未选视频时用示意画面）")
+        self.v_frame_label.dragged.connect(self._on_video_frame_drag)
+        vpv.addWidget(self.v_frame_label)
+        # 拖拽自定义位置开关：开启后可在帧上拖动定位，落点写回 X/Y 并切到「自定义」
+        self.v_drag_chk = QCheckBox("拖拽自定义位置（在预览帧上拖动水印）")
+        self.v_drag_chk.setToolTip("勾选后可在预览帧上用鼠标把水印拖到任意位置；"
+                                   "落点会自动写入上方 X/Y 百分比，下拉切到「自定义」。")
+        self.v_drag_chk.stateChanged.connect(self._v_toggle_drag)
+        vpv.addWidget(self.v_drag_chk)
+        self.v_pos_lbl = QLabel("自定义位置：未设定（默认右下/左下）")
+        self.v_pos_lbl.setWordWrap(True)
+        vpv.addWidget(self.v_pos_lbl)
+        hvprev = QHBoxLayout()
+        self.v_grab_btn = QPushButton("预览水印效果")
+        self.v_grab_btn.setStyleSheet(BTN_HL)
+        self.v_grab_btn.setToolTip("按当前设置在画面上叠好水印并显示在上方预览区；"
+                                   "未选视频时用 16:9 示意画面，同样能确认位置与效果。")
+        self.v_grab_btn.clicked.connect(self._v_grab_frame)
+        hvprev.addWidget(self.v_grab_btn)
+        hvprev.addWidget(QLabel("时刻(秒):"))
+        self.v_t_spin = QDoubleSpinBox()
+        self.v_t_spin.setRange(0, 3600); self.v_t_spin.setDecimals(1)
+        self.v_t_spin.setSingleStep(0.5); self.v_t_spin.setValue(1.0)
+        self.v_t_spin.setMaximumWidth(80)
+        self.v_t_spin.setToolTip("取视频第几秒的画面来预览；滚动水印可用它确认不同时刻的位置")
+        self.v_t_spin.valueChanged.connect(self._v_grab_frame)
+        hvprev.addWidget(self.v_t_spin)
+        hvprev.addStretch(1)
+        self.v_play_btn = QPushButton("播放短片预览")
+        self.v_play_btn.setStyleSheet(BTN_HL)
+        self.v_play_btn.setToolTip("导出前 3 秒带水印片段，并用系统默认播放器播放，"
+                                   "用于确认滚动/位置等动态效果。")
+        self.v_play_btn.clicked.connect(self._v_play_preview)
+        hvprev.addWidget(self.v_play_btn)
+        vpv.addLayout(hvprev)
+        v.addWidget(f_vprev)
+
+        # ---------------- 参数改动 → 预览即时重绘（防抖 250ms） ----------------
+        # 只在「已经抓到画面」时重绘：不会偷偷去读视频，但改文字/透明度/位置等
+        # 能立刻看到效果，不必反复点「预览水印效果」。
+        self._v_frame_timer = QTimer(self)
+        self._v_frame_timer.setSingleShot(True)
+        self._v_frame_timer.setInterval(250)
+        self._v_frame_timer.timeout.connect(self._v_show_frame)
+        for w in (self.v_text_edit, self.v_img_edit,
+                  self.v_alpha_spin, self.v_size_spin,
+                  self.v_img_alpha_spin, self.v_img_scale_spin,
+                  self.v_text_motion_combo, self.v_img_motion_combo):
+            sig = getattr(w, "textChanged", None) or getattr(w, "valueChanged", None)
+            if sig is None:
+                sig = w.currentTextChanged
+            sig.connect(self._v_schedule_frame)
+        for rb in (self.v_motion_fixed, self.v_motion_scroll, self.v_motion_both):
+            rb.toggled.connect(self._v_schedule_frame)
+        self.v_text_chk.stateChanged.connect(self._v_schedule_frame)
+        self.v_img_chk.stateChanged.connect(self._v_schedule_frame)
+
         # 运行按钮 + 进度 + 取消
         hr = QHBoxLayout()
         self.v_run_btn = QPushButton("开始加水印"); self.v_run_btn.clicked.connect(self._v_run)
@@ -850,11 +1082,72 @@ class App(QMainWindow):
         v.addWidget(self.v_status_lbl)
         return g
 
-    def _v_position(self, combo=None):
-        """取位置锚点：不传则取文字水印的位置；文字/图片各有独立锚点。"""
+    def _v_make_xy_spin(self, value):
+        """X/Y 百分比输入（0~100，1% 一档），用于精确自定义水印落点。"""
+        sp = QDoubleSpinBox()
+        sp.setRange(0, 100); sp.setDecimals(0); sp.setSingleStep(1)
+        sp.setSuffix("%"); sp.setValue(value)
+        sp.setMaximumWidth(74)
+        sp.setToolTip("自定义位置：水印左上角相对画面的百分比（0=最左/最上，100=最右/最下）")
+        return sp
+
+    def _v_position(self, combo=None, x_spin=None, y_spin=None):
+        """取位置锚点（左上角占比 0..1）。
+
+        combo 选中「自定义」时以 X/Y 百分比输入为准；不传控件则按预设解析
+        （兼容只传 combo 的旧调用）。文字与图片各有独立锚点。
+        """
         if combo is None:
             combo = self.v_text_pos_combo
-        return _V_POSITIONS.get(combo.currentText(), (0.82, 0.85))
+        name = combo.currentText()
+        p = _V_POSITIONS.get(name, (0.82, 0.85))
+        if p is not None:
+            return p
+        # 「自定义」：读 X/Y 百分比
+        if x_spin is None or y_spin is None:
+            x_spin = self.v_text_x_spin if combo is self.v_text_pos_combo else self.v_img_x_spin
+            y_spin = self.v_text_y_spin if combo is self.v_text_pos_combo else self.v_img_y_spin
+        fx = max(0.0, min(1.0, float(x_spin.value()) / 100.0))
+        fy = max(0.0, min(1.0, float(y_spin.value()) / 100.0))
+        return (fx, fy)
+
+    # --------------------------------------------- 视频位置：预设 ↔ X/Y 联动
+    def _v_mark_custom(self, combo):
+        """手改 X/Y 或在预览帧上拖拽后，把位置下拉切到「自定义」。"""
+        if getattr(self, "_v_pos_applying", False):
+            return
+        if combo.currentText() == "自定义":
+            return
+        combo.blockSignals(True)
+        combo.setCurrentText("自定义")
+        combo.blockSignals(False)
+
+    def _v_fill_xy(self, combo, x_spin, y_spin):
+        """选了预设锚点 → 把该锚点回填进 X/Y 输入，用户可直接在此基础上微调。"""
+        p = _V_POSITIONS.get(combo.currentText())
+        if p is None:      # 「自定义」不覆盖
+            return
+        self._v_pos_applying = True
+        try:
+            x_spin.setValue(round(p[0] * 100))
+            y_spin.setValue(round(p[1] * 100))
+        finally:
+            self._v_pos_applying = False
+        self._v_schedule_frame()
+
+    def _v_on_text_preset(self, _text=None):
+        self._v_fill_xy(self.v_text_pos_combo, self.v_text_x_spin, self.v_text_y_spin)
+
+    def _v_on_img_preset(self, _text=None):
+        self._v_fill_xy(self.v_img_pos_combo, self.v_img_x_spin, self.v_img_y_spin)
+
+    def _v_on_text_xy(self, _v=None):
+        self._v_mark_custom(self.v_text_pos_combo)
+        self._v_schedule_frame()
+
+    def _v_on_img_xy(self, _v=None):
+        self._v_mark_custom(self.v_img_pos_combo)
+        self._v_schedule_frame()
 
     def _v_motion(self):
         """把单选的播放方式映射为引擎 motion 值。"""
@@ -877,6 +1170,7 @@ class App(QMainWindow):
             if not self.v_out_edit.text().strip():
                 base, _ = os.path.splitext(p)
                 self.v_out_edit.setText(base + "WaterMark.mp4")
+            self._v_grab_frame()     # 选完视频自动抓一帧预览，方便立即看效果
 
     def _v_browse_out(self):
         p, _ = QFileDialog.getSaveFileName(self, "选择输出视频", "", "MP4 (*.mp4);;All (*.*)")
@@ -940,18 +1234,24 @@ class App(QMainWindow):
             kinds.append("text")
         if self.v_img_chk.isChecked():
             kinds.append("image")
+        # 位置：预设下拉 / X-Y 百分比 / 预览帧拖拽，三者最终都落在同一处——
+        # 拖拽会把落点写回 X/Y 并把下拉切到「自定义」，所以这里只需解析下拉 + X/Y。
+        tpos = self._v_position(self.v_text_pos_combo,
+                               self.v_text_x_spin, self.v_text_y_spin)
+        ipos = self._v_position(self.v_img_pos_combo,
+                               self.v_img_x_spin, self.v_img_y_spin)
         text_cfg = {
             "text": self.v_text_edit.text(),
             "color": self.v_color,
             "alpha": int(self.v_alpha_spin.value() / 100.0 * 255),
             "size_frac": self.v_size_spin.value() / 100.0,
-            "position": self._v_position(self.v_text_pos_combo),
+            "position": tpos,
         }
         image_cfg = {
             "image_path": self.v_img_edit.text().strip(),
             "alpha": int(self.v_img_alpha_spin.value() / 100.0 * 255),
             "img_frac": self.v_img_scale_spin.value() / 100.0,
-            "position": self._v_position(self.v_img_pos_combo),
+            "position": ipos,
         }
         global_motion = self._v_motion()
         # 文字/图片各自可单独指定播放方式；选“跟随”时才用全局的
@@ -983,6 +1283,182 @@ class App(QMainWindow):
                 "text": {"motion": _resolve_motion(self.v_text_motion_combo, self._v_motion())},
                 "image": {"motion": _resolve_motion(self.v_img_motion_combo, self._v_motion())}}
         self.v_speed_spin.setEnabled("scroll" in video_mod._effective_motions(opts))
+
+    # --------------------------------------------------- 视频预览 / 拖拽定位
+    def _v_toggle_drag(self, state):
+        """拖拽开关：开启后在预览帧上拖动即可定位，落点写回 X/Y（下拉切「自定义」）。
+
+        注意：stateChanged 在 PySide6 里传的是枚举，而部分环境/老代码会按 int 比较，
+        用 int(state) != 0 兼容两种形态，避免判断失效。
+        """
+        # PySide6 的 CheckState 是独立枚举（既不等于 int，也不能直接 int()），
+        # PyQt6 / 老接口又可能传 int；统一取 .value（没有就当 int）再判非零。
+        _s = getattr(state, "value", state)
+        on = (int(_s) != 0)
+        # 不再停用预设下拉：拖拽与下拉/X-Y 是同一份状态，互为入口更直观
+        if on and self.v_custom_pos is None:
+            p = self._v_position(self.v_text_pos_combo,
+                                 self.v_text_x_spin, self.v_text_y_spin)
+            self.v_custom_pos = (p[0], p[1])
+        self._v_update_pos_label()
+        if on:
+            self._v_show_frame()      # 立即按自定义位置重绘
+
+    def _v_update_pos_label(self):
+        """位置摘要：优先显示「自定义」落点，否则显示当前预设对应的 X/Y。"""
+        if getattr(self, "v_custom_pos", None):
+            self.v_pos_lbl.setText(
+                f"自定义位置：X {self.v_custom_pos[0]*100:.0f}%  "
+                f"Y {self.v_custom_pos[1]*100:.0f}%")
+            return
+        tpos = self._v_position(self.v_text_pos_combo,
+                                self.v_text_x_spin, self.v_text_y_spin)
+        ipos = self._v_position(self.v_img_pos_combo,
+                                self.v_img_x_spin, self.v_img_y_spin)
+        self.v_pos_lbl.setText(
+            f"文字 X {tpos[0]*100:.0f}% Y {tpos[1]*100:.0f}% ｜ "
+            f"图片 X {ipos[0]*100:.0f}% Y {ipos[1]*100:.0f}%")
+
+    def _v_preview_time(self):
+        """预览取第几秒的画面（滚动水印可借此看不同时刻的位置）。"""
+        sp = getattr(self, "v_t_spin", None)
+        return float(sp.value()) if sp is not None else 1.0
+
+    def _v_placeholder_frame(self):
+        """未选视频时的 16:9 示意画面：深灰底 + 浅色网格，便于确认水印位置与大小。"""
+        from PIL import Image as _PILImage, ImageDraw as _PILDraw
+        w, h = 1280, 720
+        img = _PILImage.new("RGB", (w, h), (48, 48, 52))
+        d = _PILDraw.Draw(img)
+        step = 80
+        for x in range(0, w, step):
+            d.line([(x, 0), (x, h)], fill=(70, 70, 76), width=1)
+        for y in range(0, h, step):
+            d.line([(0, y), (w, y)], fill=(70, 70, 76), width=1)
+        d.rectangle([w // 2 - 90, h // 2 - 26, w // 2 + 90, h // 2 + 26],
+                    fill=(90, 90, 96))
+        return img
+
+    def _v_grab_frame(self):
+        """取一帧画面并按当前设置叠好水印显示。
+
+        已选视频 → 抓该视频第 N 秒的真实帧；未选视频 → 用 16:9 示意画面，
+        这样在挑视频之前也能先确认水印的位置/大小/透明度。
+        """
+        src = self.v_src_edit.text().strip()
+        t = self._v_preview_time()
+        if not src or not os.path.exists(src):
+            # 无源视频：用示意画面，保证「先预览后选片」也走得通
+            self._v_last_frame = self._v_placeholder_frame()
+            self._v_show_frame()
+            self.v_status_lbl.setText(
+                "未选择视频，当前为 16:9 示意画面；选好视频后会自动换成真实帧。")
+            return
+        opts = self._v_gather_opts()
+        try:
+            raw = video_mod.grab_raw_frame(src, opts, t_sec=t)
+        except Exception as e:
+            self.v_frame_label.clearImage()
+            self.v_frame_label.setText(f"抓取失败：{e}")
+            return
+        self._v_last_frame = raw
+        self._v_show_frame()
+
+    def _v_show_frame(self):
+        """在已抓取的画面上，按当前设置（含自定义位置）重绘带水印的预览。"""
+        if getattr(self, "_v_last_frame", None) is None:
+            return
+        opts = self._v_gather_opts()
+        try:
+            img = video_mod.compose_on_frame(self._v_last_frame, opts,
+                                             t_sec=self._v_preview_time())
+        except Exception as e:
+            self.v_frame_label.setText(f"叠水印失败：{e}")
+            return
+        bio = io.BytesIO(); img.save(bio, "PNG"); bio.seek(0)
+        qimg = QImage.fromData(bio.getvalue())
+        self.v_frame_label.setBasePixmap(QPixmap.fromImage(qimg))
+        if getattr(self, "v_custom_pos", None):
+            self.v_frame_label.setMarker(*self.v_custom_pos)
+        self._v_update_pos_label()
+
+    def _v_schedule_frame(self):
+        """参数改动后防抖重绘预览（已抓到画面时才重绘，不会自动去读视频）。"""
+        if getattr(self, "_v_last_frame", None) is None:
+            return
+        timer = getattr(self, "_v_frame_timer", None)
+        if timer is None:
+            return
+        timer.start()
+
+    def _on_video_frame_drag(self, fx, fy):
+        """视频预览帧拖拽：把落点写回 X/Y 并切到「自定义」，随后实时重绘。
+
+        文字与图片统一采用该落点（与 Word 侧拖拽行为一致），用户若想错开，
+        可在拖拽后单独改图片的 X/Y。
+        """
+        if not self.v_drag_chk.isChecked():
+            return
+        self.v_custom_pos = (fx, fy)
+        self._v_pos_applying = True
+        try:
+            for sp in (self.v_text_x_spin, self.v_img_x_spin):
+                sp.setValue(round(fx * 100))
+            for sp in (self.v_text_y_spin, self.v_img_y_spin):
+                sp.setValue(round(fy * 100))
+            for cb in (self.v_text_pos_combo, self.v_img_pos_combo):
+                cb.blockSignals(True)
+                cb.setCurrentText("自定义")
+                cb.blockSignals(False)
+        finally:
+            self._v_pos_applying = False
+        self._v_update_pos_label()
+        self._v_show_frame()
+
+    def _v_play_preview(self):
+        """导出前 3 秒带水印片段，并用系统默认播放器播放，用于确认动态效果。"""
+        src = self.v_src_edit.text().strip()
+        if not src or not os.path.exists(src):
+            QMessageBox.warning(self, "提示", "请先选择有效的视频文件。")
+            return
+        opts = self._v_gather_opts()
+        kinds = list(opts["kinds"])
+        if not kinds:
+            QMessageBox.warning(self, "提示", "请至少启用一种水印（文字或图片）。")
+            return
+        if "image" in kinds and not self.v_img_edit.text().strip():
+            QMessageBox.warning(self, "提示", "已启用图片水印，但还未选择水印图片。")
+            return
+        if "text" in kinds and not self.v_text_edit.text().strip():
+            QMessageBox.warning(self, "提示", "已启用文字水印，但水印文字为空。")
+            return
+        stem, _ = os.path.splitext(os.path.basename(src))
+        out = os.path.join(tempfile.gettempdir(), f"WriteMark_preview_{stem}.mp4")
+        self._v_preview_out = out
+        self.v_status_lbl.setText("正在生成预览短片（前 3 秒），请稍候…")
+        self.v_play_btn.setEnabled(False)
+        self.v_grab_btn.setEnabled(False)
+        w = VideoWorker(src, out, opts, max_seconds=3)
+        self._v_preview_worker = w
+        w.result_signal.connect(self._v_preview_done)
+        w.progress_signal.connect(self._v_on_progress)
+        w.start()
+
+    def _v_preview_done(self, ok, msg):
+        self.v_play_btn.setEnabled(True)
+        self.v_grab_btn.setEnabled(True)
+        if ok:
+            out = getattr(self, "_v_preview_out", "")
+            if out and os.path.exists(out):
+                try:
+                    os.startfile(out)      # Windows：用系统默认播放器打开
+                    self.v_status_lbl.setText("已生成预览短片，正在用系统播放器打开…")
+                except Exception as e:
+                    self.v_status_lbl.setText(f"预览短片已生成，但无法自动打开：{e}")
+            else:
+                self.v_status_lbl.setText("预览短片生成成功，但找不到输出文件。")
+        else:
+            self.v_status_lbl.setText("预览生成失败：" + msg)
 
     def _v_run(self):
         # 冻结版没有控制台，槽函数里任何异常都会被 Qt 静默吞掉、表现为“点了没反应”，
@@ -1337,8 +1813,10 @@ class App(QMainWindow):
         self.text_scale = float(v)
     def _on_text_offx(self, v):
         self.text_offset_x = float(v)
+        self._mark_pos_custom(self.text_pos_combo)
     def _on_text_offy(self, v):
         self.text_offset_y = float(v)
+        self._mark_pos_custom(self.text_pos_combo)
 
     def _on_img_angle(self, v):
         self.img_angle = float(v)
@@ -1348,8 +1826,43 @@ class App(QMainWindow):
         self.img_scale = float(v)
     def _on_img_offx(self, v):
         self.img_offset_x = float(v)
+        self._mark_pos_custom(self.img_pos_combo)
     def _on_img_offy(self, v):
         self.img_offset_y = float(v)
+        self._mark_pos_custom(self.img_pos_combo)
+
+    # ------------------------------------------------ 位置预设 / 自定义位置
+    def _mark_pos_custom(self, combo):
+        """手动改了偏移（或拖了预览图）→ 位置下拉切到「自定义」，避免预设值误导。
+
+        预设写入偏移期间由 _pos_applying 屏蔽，否则会立刻把自己打回「自定义」。
+        """
+        if getattr(self, "_pos_applying", False):
+            return
+        if combo is None or combo.currentText() == "自定义":
+            return
+        combo.blockSignals(True)
+        combo.setCurrentText("自定义")
+        combo.blockSignals(False)
+
+    def _apply_pos_preset(self, preset, x_spin, y_spin):
+        """九宫格预设 → 写入水平/垂直偏移（0=页面中心）。"""
+        off = _W_POS_PRESETS.get(preset)
+        if off is None:      # 「自定义」：不做任何覆盖，沿用当前偏移
+            return
+        self._pos_applying = True
+        try:
+            x_spin.setValue(off[0])
+            y_spin.setValue(off[1])
+        finally:
+            self._pos_applying = False
+        self._schedule_preview()
+
+    def _on_text_pos_preset(self, preset):
+        self._apply_pos_preset(preset, self.text_offx_spin, self.text_offy_spin)
+
+    def _on_img_pos_preset(self, preset):
+        self._apply_pos_preset(preset, self.img_offx_spin, self.img_offy_spin)
 
     def _on_text_enabled(self, state):
         self.text_enabled = self.text_chk.isChecked()
@@ -1660,7 +2173,15 @@ class App(QMainWindow):
         # 6s 是刻意留出的余量：下面等待后台线程的完整路径最长约 3s，
         # 必须让“正常清理”跑在兜底之前完成，否则明明能优雅退出却被硬杀
         # （此前的 1.2s 就会误杀正在等待线程退出的正常关闭流程）。
-        killer = threading.Timer(6.0, lambda: os._exit(0))
+        # 注意：pytest 下这个兜底不能真动手——6 秒后它会把「整个测试进程」
+        # 静默 os._exit(0)，表现为回归跑到一半无报错中断（v1.3.9 踩到过）。
+        # 线程照常启动（行为一致、可测），只是回调在测试环境里空转。
+        def _force_exit():
+            if "PYTEST_CURRENT_TEST" in os.environ:
+                return
+            os._exit(0)
+
+        killer = threading.Timer(6.0, _force_exit)
         killer.daemon = True
         killer.start()
         if self.tray is not None:
@@ -1713,15 +2234,27 @@ class App(QMainWindow):
         except Exception as e:
             # 实时预览过程中参数可能暂时不完整（如未选图片），直接在预览区提示，不弹窗打断
             self._preview_img = None
-            self.preview_label.setPixmap(QPixmap())  # 清空旧图
+            self.preview_label.clearImage()
             self.preview_label.setText(f"预览不可用：{e}")
             return
         self._preview_img = img
         bio = __import__("io").BytesIO(); img.save(bio, "PNG"); bio.seek(0)
         qimg = QImage.fromData(bio.getvalue())
         pix = QPixmap.fromImage(qimg)
-        scaled = pix.scaled(self.preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        self.preview_label.setPixmap(scaled)
+        self.preview_label.setBasePixmap(pix)
+
+    def _on_preview_drag(self, fx, fy):
+        """Word 预览拖拽：把水印中心映射到水平/垂直偏移（-50%~50%，0=居中）。"""
+        if not self.preview_drag_chk.isChecked():
+            return
+        off_x = max(-50.0, min(50.0, (fx - 0.5) * 100.0))
+        off_y = max(-50.0, min(50.0, (fy - 0.5) * 100.0))
+        # 文本与图像水印同步到同一落点（预览里两者常见叠在一起）
+        self.text_offx_spin.setValue(off_x)
+        self.text_offy_spin.setValue(off_y)
+        self.img_offx_spin.setValue(off_x)
+        self.img_offy_spin.setValue(off_y)
+        # 滑块的 valueChanged 已触发 _schedule_preview，这里无需再手动刷新
 
     def _save_preview(self):
         if self._preview_img is None:

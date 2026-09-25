@@ -81,7 +81,9 @@ def test_engine_uses_font_name():
 
 def test_gui_apply_fonts():
     # 直接构造真实 App（offscreen），验证中/西文字体下拉框合并逻辑：去重/保留当前选择/返回新增数量
-    app = QApplication(sys.argv)
+    # 注意：整套回归里前面的用例可能已经建过 QApplication（单例不可重复创建），
+    # 必须先取 instance，否则整轮跑下来会报 libshiboken 单例冲突。
+    app = QApplication.instance() or QApplication(sys.argv)
     from watermark_tool.gui import App
     win = App()
     combo = win.cn_font_combo  # 中文字体框；两个框逻辑一致，测其一即可
@@ -341,12 +343,16 @@ def test_mixed_baseline_alignment():
 
 def test_close_event_no_error():
     # closeEvent 在打桩 os._exit 下不应抛异常（验证线程清理逻辑健壮）。
+    # 默认关闭行为是「最小化到后台」，不走强退路径；用 WM_CLOSE_CHOICE=quit
+    # 才能覆盖到「停守护 + 兜底计时线程」这段代码（与自动化退出同一条路径）。
     import os as _os
     import threading as _th
     from PySide6.QtWidgets import QApplication
     from PySide6.QtGui import QCloseEvent
     real_exit = _os._exit
     _os._exit = lambda code: None  # 防止测试进程被真正杀掉
+    _saved_choice = _os.environ.get("WM_CLOSE_CHOICE")
+    _os.environ["WM_CLOSE_CHOICE"] = "quit"
     try:
         app = QApplication.instance() or QApplication([])
         from watermark_tool.gui import App
@@ -357,6 +363,10 @@ def test_close_event_no_error():
         assert any(True for _ in daemons), "应有守护兜底计时线程在运行"
     finally:
         _os._exit = real_exit
+        if _saved_choice is None:
+            _os.environ.pop("WM_CLOSE_CHOICE", None)
+        else:
+            _os.environ["WM_CLOSE_CHOICE"] = _saved_choice
     print("[gui] closeEvent 线程清理 + 兜底强退计时线程 启动正常")
 
 
