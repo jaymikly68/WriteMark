@@ -193,7 +193,7 @@ class App(QMainWindow):
         f_out = QWidget()
         ho = QHBoxLayout(f_out); ho.setContentsMargins(0, 0, 0, 0)
         ho.addWidget(QLabel("输出:"))
-        self.out_edit = QLineEdit(); self.out_edit.setPlaceholderText("默认保存到桌面/<原名>_水印.docx，可点击浏览修改")
+        self.out_edit = QLineEdit(); self.out_edit.setPlaceholderText("默认保存到桌面/<原名>WaterMark.docx，可点击浏览修改")
         ho.addWidget(self.out_edit, 3)
         bout = QPushButton("浏览..."); bout.clicked.connect(self._browse_output); ho.addWidget(bout, 1)
         root.addWidget(f_out)
@@ -315,10 +315,21 @@ class App(QMainWindow):
         h_types.addWidget(f_img)
         root.addLayout(h_types)
 
-        # ---------------- 按钮
+        # ---------------- 按钮（插入/清除设为蓝底黑字高亮，突出主操作）
+        BTN_HL = (
+            "QPushButton {"
+            "  background-color:#1a73e8; color:#000; font-weight:700;"
+            "  border:2px solid #0b57d0; border-radius:6px;"
+            "  padding:8px 16px; min-height:34px;"
+            "}"
+            "QPushButton:hover { background-color:#2b82f1; }"
+            "QPushButton:pressed { background-color:#0b57d0; }"
+        )
         hb = QHBoxLayout()
-        self._btn_insert = QPushButton("一键插入水印"); self._btn_insert.clicked.connect(self._insert); hb.addWidget(self._btn_insert)
-        self._btn_clear = QPushButton("一键清除水印"); self._btn_clear.clicked.connect(self._clear); hb.addWidget(self._btn_clear)
+        self._btn_insert = QPushButton("一键插入水印"); self._btn_insert.clicked.connect(self._insert)
+        self._btn_insert.setStyleSheet(BTN_HL); hb.addWidget(self._btn_insert)
+        self._btn_clear = QPushButton("一键清除水印"); self._btn_clear.clicked.connect(self._clear)
+        self._btn_clear.setStyleSheet(BTN_HL); hb.addWidget(self._btn_clear)
         root.addLayout(hb)
 
         # ---------------- 防去除加固（可选）
@@ -723,7 +734,7 @@ class App(QMainWindow):
                                            "Word 文件 (*.docx *.doc);;All (*.*)")
         if p:
             self.file_path = p; self.file_edit.setText(p)
-            # 选完源文件后，自动给出默认输出路径（桌面/同名_水印），用户可改
+            # 选完源文件后，自动给出默认输出路径（桌面/<原名>WaterMark），用户可改
             self.out_edit.setText(core.default_output_path(p))
             # 导入 Word 后，征询用户同意后读取其可用字体，扩充文本水印字体选择
             self._maybe_load_word_fonts()

@@ -22,7 +22,7 @@ def get_desktop() -> str:
     return None
 
 
-def default_output_path(src_path: str, suffix="_水印") -> str:
+def default_output_path(src_path: str, suffix="WaterMark") -> str:
     """默认输出路径：桌面/源文件同名+后缀；桌面不存在时退化为源文件同目录。"""
     src_path = os.path.abspath(src_path)
     desk = get_desktop()
@@ -35,7 +35,7 @@ def _protect_original(src_path: str, output_path: str) -> str:
     """若输出路径与源文件完全相同（会覆盖原文件），自动加后缀保护原文件。"""
     if os.path.abspath(output_path) == os.path.abspath(src_path):
         stem, ext = os.path.splitext(output_path)
-        return f"{stem}{'_水印'}{ext}"
+        return f"{stem}{'WaterMark'}{ext}"
     return output_path
 
 
@@ -80,7 +80,7 @@ def insert_watermark(src_path: str, kinds, output_path: str = None, **opts) -> d
     """
     插入水印。kinds 为包含 'text' / 'image' 的列表，可同时含两者（同时添加两类水印）。
     默认【不破坏原文件】：复制到 output_path 后在副本上操作。
-    - output_path 为 None：默认输出到桌面/<原名>_水印<ext>。
+    - output_path 为 None：默认输出到桌面/<原名>WaterMark<ext>。
     - 若 output_path 与源文件相同：自动加后缀，避免覆盖原文件。
     - 返回 dict 内含 "output" 字段，标明实际写出位置。
     """
