@@ -138,6 +138,136 @@ def test_video_motion_matrix():
     print("video 播放方式 x 水印类型 搭配矩阵 PASS")
 
 
+def test_video_export_resolution_and_fps():
+    """导出分辨率 / 帧率必须按 opts 生效，且水印依然被叠加。
+
+    历史问题：水印图层按“源分辨率”构建，放大导出时等于把小图二次拉伸，
+    结果就是“图片水印又糊又小”。现在图层按输出分辨率构建。
+    """
+    from watermark_tool import video
+
+    d = tempfile.mkdtemp()
+    src = os.path.join(d, "src.mp4")
+    _make_video(src, W=320, H=240, N=12)
+    out = os.path.join(d, "out_720.mp4")
+
+    res = video.add_video_watermark(src, out, {
+        "kinds": ["text"], "motion": "fixed", "scroll_speed": 0,
+        "out_size": (720, 480), "fps": 30, "crf": 18,
+        "text": {"text": "机密", "color": (255, 0, 0), "alpha": 220, "size_frac": 0.15,
+                 "position": (0.8, 0.8)},
+    })
+    assert res["ok"], res
+    meta = iio.get_reader(out, "ffmpeg").get_meta_data()
+    w, h = meta["size"]
+    assert (w, h) == (720, 480), f"导出分辨率应为 720x480，实际 {w}x{h}"
+    assert abs(float(meta["fps"]) - 30) < 1.5, f"导出帧率应约 30，实际 {meta['fps']}"
+
+    fr = iio.get_reader(out, "ffmpeg").get_data(11)
+    red = int((fr[:, :, 0] > 150).sum())
+    assert red > 0, "放大到 720x480 后末帧仍应含文字水印"
+    assert res["size"] == (720, 480) and abs(res["fps"] - 30) < 0.01 and res["crf"] == 18
+    print("video 导出分辨率/帧率生效 PASS")
+
+
+def test_video_crf_passthrough(monkeypatch):
+    """清晰度参数：不能再用 imageio 默认的 crf≈25，必须把 crf 传进 ffmpeg。"""
+    from watermark_tool import video
+
+    captured = {}
+
+    class _FakeWriter:
+        def __init__(self, *a, **k):
+            captured.update(k)
+
+        def append_data(self, data):
+            pass
+
+        def close(self):
+            pass
+
+    d = tempfile.mkdtemp()
+    src = os.path.join(d, "src.mp4")
+    _make_video(src, W=64, H=48, N=6)
+    # 注意：必须在生成测试视频之后再打这个补丁（iio 是同一个模块对象）
+    monkeypatch.setattr(video.iio, "get_writer",
+                        lambda *a, **k: _FakeWriter(*a, **k))
+    video.add_video_watermark(src, os.path.join(d, "o.mp4"), {
+        "kinds": ["text"], "motion": "fixed", "scroll_speed": 0,
+        "crf": 14,
+        "text": {"text": "X", "color": (255, 0, 0), "alpha": 200, "size_frac": 0.2},
+    })
+    assert captured.get("quality") is None, "必须关掉 imageio 的 quality 默认档"
+    params = captured.get("output_params") or []
+    assert "-crf" in params and params[params.index("-crf") + 1] == "14", \
+        f"crf 未传进 ffmpeg：{params}"
+    print("video crf 参数透传 PASS")
+
+
+def test_image_layer_supersample_sharpness():
+    """小图大幅放大时走超采样 + 轻锐化，锐度不能低于直接 LANCZOS。"""
+    from watermark_tool import video
+    from PIL import Image, ImageFilter
+
+    d = tempfile.mkdtemp()
+    p = os.path.join(d, "small.png")
+    # 高频边缘图：能否保住边缘正是“糊”的判定点
+    im = Image.new("RGBA", (24, 24), (0, 0, 0, 0))
+    px = im.load()
+    for y in range(24):
+        for x in range(24):
+            if (x // 2 + y // 2) % 2 == 0:
+                px[x, y] = (255, 255, 255, 255)
+    im.save(p)
+
+    layer = video._build_image_layer(p, 1920, 1080, {"img_frac": 0.2, "alpha": 255})
+    target_w = 1920 * 0.2
+    assert abs(layer.size[0] - target_w) <= 2, f"图层宽度异常: {layer.size}"
+    assert layer.size[0] > 24 * 1.5, "应触发放大分支"
+
+    def _grad(img):
+        g = img.convert("L").filter(ImageFilter.FIND_EDGES)
+        a = np.asarray(g, dtype=float)
+        return float(a.std())
+
+    direct = im.resize((int(target_w), int(round(24 * target_w / 24))), Image.LANCZOS)
+    sharp = video._resize_for_watermark(im, (int(target_w), int(round(24 * target_w / 24))))
+    assert _grad(sharp) >= _grad(direct) * 0.98, \
+        f"超采样结果应不比直接放大更糊: {_grad(sharp)} vs {_grad(direct)}"
+    print("video 图片水印超采样锐度 PASS")
+
+
+def test_gui_export_spec_defaults_and_limits():
+    """导出规格：默认 1080P / 跟随屏幕刷新率，且一律不超过显示器上限。"""
+    from watermark_tool import video
+    from watermark_tool.gui import App, _screen_geometry, _screen_refresh_rate
+
+    app = QApplication.instance() or QApplication([])
+    w = App()
+    disp_w, disp_h = _screen_geometry()
+    rate = _screen_refresh_rate()
+
+    assert w.v_res_items, "至少应提供一个可选分辨率"
+    for lb, iw, ih in w.v_res_items:
+        assert iw <= disp_w and ih <= disp_h, \
+            f"选项 {lb} 超过显示器上限 {disp_w}x{disp_h}"
+    idx1080 = [i for i, (lb, _a, _b) in enumerate(w.v_res_items) if lb.startswith("1080P")]
+    if idx1080:
+        assert w.v_res_combo.currentIndex() == idx1080[0], "默认导出分辨率应为 1080P"
+    assert w._v_out_spec() == w.v_res_items[w.v_res_combo.currentIndex()][1:], \
+        "解析出的分辨率与界面选项不一致"
+
+    for f in w.v_fps_items:
+        assert f <= rate, f"帧率选项 {f} 超过屏幕刷新率 {rate}"
+    assert w._v_out_fps() == max(w.v_fps_items), "默认帧率应跟随屏幕刷新率"
+    assert w._v_out_crf() == video.CRF_PRESETS["标准"], "默认画质应为标准"
+
+    ow, oh = w._v_out_spec()
+    assert isinstance(ow, int) and isinstance(oh, int) and ow > 0 and oh > 0, \
+        f"导出分辨率应为正整数，实际 {w._v_out_spec()}"
+    print("GUI 导出规格默认与上限 PASS")
+
+
 def test_docx_detect_and_clear_by_kind():
     d = tempfile.mkdtemp()
     src = os.path.join(d, "doc.docx")

@@ -29,9 +29,15 @@ import tempfile
 import numpy as np
 import imageio.v2 as iio
 import imageio_ffmpeg
-from PIL import Image
+from PIL import Image, ImageFilter
 
 from . import engine_docx  # 仅复用纯 PIL 的文字/图片渲染函数
+
+
+# H.264 恒定质量因子：越小越清晰。imageio 默认 quality=5 会换算成 crf≈25，
+# 那就是“导出视频发糊”的根源，这里默认提到 18（接近视觉无损），并允许用户再调。
+DEFAULT_CRF = 18
+CRF_PRESETS = {"省空间": 23, "标准": 18, "高": 14, "极高": 10}
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +60,34 @@ def _build_text_layer(text: str, frame_w: int, frame_h: int, cfg: dict) -> Image
     return layer
 
 
+def _resize_for_watermark(img: Image.Image, size: tuple[int, int]) -> Image.Image:
+    """水印图的缩放策略——图片水印“糊”多半出在这里。
+
+    小图直接放大（一步 LANCZOS）会得到很软的边缘：先超采样再收缩，
+    最后补一道极轻微的锐化，能明显改善 logo/字标一类水印的锐度。
+    """
+    tw, th = size
+    w, h = img.size
+    if tw <= 0 or th <= 0:
+        return img
+    if tw == w and th == h:
+        return img
+    if tw < w:
+        # 缩小：LANCZOS 内部自带预滤波，直接一步即可
+        return img.resize((tw, th), Image.LANCZOS)
+    if tw <= w * 1.5:
+        # 小幅放大：普通 LANCZOS 就够，锐化反而会出毛刺
+        return img.resize((tw, th), Image.LANCZOS)
+    # 大幅放大：3 倍超采样 -> 收回到目标 -> 轻微锐化
+    big = img.resize((w * 3, max(1, int(round(h * 3)))), Image.LANCZOS)
+    work = big.resize((tw, th), Image.LANCZOS)
+    try:
+        work = work.filter(ImageFilter.UnsharpMask(radius=1.0, percent=55, threshold=2))
+    except Exception:
+        pass
+    return work
+
+
 def _build_image_layer(image_path: str, frame_w: int, frame_h: int, cfg: dict) -> Image.Image:
     """把用户图片缩放成水印图层（透明背景）。"""
     alpha = int(max(0, min(255, float(cfg.get("alpha", 180)))))
@@ -62,7 +96,7 @@ def _build_image_layer(image_path: str, frame_w: int, frame_h: int, cfg: dict) -
     target_w = max(16, int(frame_w * img_frac))
     scale = target_w / base.width
     target_h = max(16, int(base.height * scale))
-    layer = base.resize((target_w, target_h), Image.LANCZOS)
+    layer = _resize_for_watermark(base, (target_w, target_h))
     angle = float(cfg.get("angle", 0))
     if angle:
         layer = layer.rotate(angle, expand=True, resample=Image.BICUBIC)
@@ -150,6 +184,21 @@ def _scroll_pos(layer_w: int, layer_h: int, frame_w: int, frame_h: int,
 # ---------------------------------------------------------------------------
 # 主入口
 # ---------------------------------------------------------------------------
+def _resolve_out_size(opts: dict, src_w: int, src_h: int) -> tuple[int, int]:
+    """解析 opts['out_size']；缺省或非法则沿用源分辨率。"""
+    raw = opts.get("out_size")
+    if not raw:
+        return src_w, src_h
+    try:
+        w = int(raw[0])
+        h = int(raw[1])
+    except Exception:
+        return src_w, src_h
+    if w <= 0 or h <= 0:
+        return src_w, src_h
+    return w, h
+
+
 def add_video_watermark(src: str, output: str, opts: dict,
                         progress_fn=None, stop_check=None) -> dict:
     """
@@ -162,6 +211,11 @@ def add_video_watermark(src: str, output: str, opts: dict,
       motion       : 'fixed' 固定 / 'scroll' 滚动 / 'both' 固定+滚动（同一图层两份）。
                      兼容旧字段 mode。
       scroll_speed : 滚动速度（每秒移动“帧宽”的比例，默认 0.12）。
+      out_size     : (w, h) 输出分辨率；缺省/非法则用源分辨率。水印图层按
+                     **输出分辨率**构建，因此放大导出时水印依然锐利。
+      fps          : 输出帧率，缺省跟随源视频；与滚动速度都以时间为基准，
+                     改帧率不会影响滚动节奏感。
+      crf          : H.264 恒定质量（10~30，越小越清晰，默认 18）。
     每个类型可用 position 单独指定锚点；缺省 (0.85, 0.85)。固定+滚动时该锚点
     既是固定副本的位置，也是滚动副本的纵向锚点。
     返回 dict 含 output / frames / engine / motion。
@@ -202,6 +256,18 @@ def add_video_watermark(src: str, output: str, opts: dict,
     except Exception:
         total = 0
 
+    # ---- 输出规格：分辨率 / 帧率 / 画质 ----
+    W, H = _resolve_out_size(opts, W, H)      # 水印要按“导出分辨率”构建才不会糊
+    out_fps = float(opts.get("fps", fps) or fps)
+    if out_fps <= 0:
+        out_fps = fps
+    try:
+        crf = int(opts.get("crf", DEFAULT_CRF))
+    except Exception:
+        crf = DEFAULT_CRF
+    crf = max(10, min(30, crf))
+    need_resize = True     # 后续统一按输出尺寸规整，简单且不会漏帧
+
     # 水印图层与帧尺寸相关、但与帧内容无关：仅构造一次，循环里只换位置，省大量 CPU
     layers = _layer_specs(W, H, kinds, text_cfg, image_cfg)
     if not layers:
@@ -218,16 +284,24 @@ def add_video_watermark(src: str, output: str, opts: dict,
     # 先写到临时无声视频，最后再 mux 原音轨
     tmp_fd, tmp_vid = tempfile.mkstemp(suffix=".mp4")
     os.close(tmp_fd)
-    writer = iio.get_writer(tmp_vid, "ffmpeg", fps=fps, macro_block_size=1)
+    # quality=None 关掉 imageio 的 crf≈25 默认档（那就是导出发糊的根源），
+    # 改用显式 crf 控制清晰度；尺寸由每帧统一 resize 保证一致，无需再传 size。
+    writer = iio.get_writer(
+        tmp_vid, "ffmpeg", fps=out_fps, macro_block_size=1, quality=None,
+        output_params=["-crf", str(crf), "-preset", "veryfast",
+                       "-pix_fmt", "yuv420p"],
+    )
 
     frame_idx = 0
     try:
         for frame in reader:
             if stop_check is not None and stop_check():
                 break
-            # frame 多为 RGB uint8；统一转 RGBA 以便合成
+            # frame 多为 RGB uint8；统一转 RGBA 并按导出分辨率放大/缩小
             img = Image.fromarray(np.asarray(frame)).convert("RGBA")
-            t_sec = frame_idx / fps
+            if need_resize:
+                img = img.resize((W, H), Image.LANCZOS)
+            t_sec = frame_idx / out_fps
             painted = set()   # “固定+滚动”下避免同一图层在完全相同坐标被叠加两次
             for spec in layers:
                 layer = spec["img"]
@@ -278,7 +352,8 @@ def add_video_watermark(src: str, output: str, opts: dict,
     # 返回“实际生效”的播放方式合集：逐类型覆盖会让实际叠加方式多于全局选择
     used = sorted({m for s in layers for m in (s.get("motions") or motions)})
     return {"ok": True, "engine": "video", "frames": frames_done,
-            "output": output, "motion": "+".join(used)}
+            "output": output, "motion": "+".join(used),
+            "size": (W, H), "fps": round(out_fps, 3), "crf": crf}
 
 
 def _mux_audio(tmp_vid: str, src: str, output: str) -> bool:

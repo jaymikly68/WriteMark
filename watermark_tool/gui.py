@@ -84,6 +84,55 @@ def _resolve_motion(combo, global_motion: str) -> str:
     return _V_MOTION_MAP.get(label, global_motion)
 
 
+# ---------------------------------------------------------------------------
+# 导出能力上限：一律不超过用户当前显示器的分辨率与刷新率
+# ---------------------------------------------------------------------------
+def _screen_geometry() -> tuple[int, int]:
+    """当前主屏幕的可显示分辨率 (w, h)；取不到时用 1920x1080 兜底。"""
+    try:
+        from PySide6.QtGui import QGuiApplication
+        scr = QGuiApplication.primaryScreen() or QGuiApplication.screens()[0]
+        rect = scr.availableGeometry()
+        return rect.width(), rect.height()
+    except Exception:
+        return 1920, 1080
+
+
+def _v_resolution_items() -> list[tuple[str, int, int]]:
+    """可选导出分辨率，按显示器高度上限裁剪；默认档为 1080P。"""
+    disp_w, disp_h = _screen_geometry()
+    presets = [(f"480P（{854}×{480}）", 854, 480),
+               (f"720P（{1280}×{720}）", 1280, 720),
+               (f"1080P（{1920}×{1080}）", 1920, 1080),
+               (f"2K（{2560}×{1440}）", 2560, 1440),
+               (f"4K（{3840}×{2160}）", 3840, 2160)]
+    items = [(lb, w, h) for lb, w, h in presets if w <= disp_w and h <= disp_h]
+    if not items:                      # 显示器比 480P 还小（极端情况）也给出一个
+        items = [(f"{disp_w}×{disp_h}", disp_w, disp_h)]
+    return items
+
+
+def _screen_refresh_rate() -> int:
+    """当前主屏幕刷新率（Hz）；取不到时按 60 兜底。"""
+    try:
+        from PySide6.QtGui import QGuiApplication
+        scr = QGuiApplication.primaryScreen() or QGuiApplication.screens()[0]
+        rate = int(round(scr.refreshRate()))
+    except Exception:
+        rate = 60
+    return rate if rate > 0 else 60
+
+
+def _v_fps_items() -> list[int]:
+    """可选帧率，上限为用户屏幕刷新率；默认取屏幕上限对应的那一档。"""
+    rate = _screen_refresh_rate()
+    cands = [24, 25, 30, 48, 50, 60, 75, 90, 100, 120, 144]
+    items = [f for f in cands if f <= rate]
+    if not items:                      # 刷新率低于 24 的罕见情况，直接给屏幕值
+        items = [max(8, rate)]
+    return items
+
+
 class Worker(QThread):
     """在后台线程执行插入/清除，结果通过信号回传主线程。"""
     log_signal = Signal(str)
@@ -636,6 +685,31 @@ class App(QMainWindow):
         hp.addStretch(1)
         v.addLayout(hp)
 
+        # 导出规格：分辨率 / 帧率 / 画质（均按用户显示器能力自动限高）
+        hs = QHBoxLayout()
+        hs.addWidget(QLabel("导出分辨率:"))
+        self.v_res_combo = QComboBox()
+        self.v_res_items = _v_resolution_items()          # 已按显示器上限裁剪
+        self.v_res_combo.addItems([t for t, _w, _h in self.v_res_items])
+        if self.v_res_items:
+            self.v_res_combo.setCurrentIndex(
+                min(2, len(self.v_res_items) - 1))        # 默认 1080P
+        hs.addWidget(self.v_res_combo, 0)
+        hs.addWidget(QLabel("帧率:"))
+        self.v_fps_combo = QComboBox()
+        self.v_fps_items = _v_fps_items()
+        self.v_fps_combo.addItems([t for t in self.v_fps_items])
+        if self.v_fps_items:
+            self.v_fps_combo.setCurrentIndex(len(self.v_fps_items) - 1)  # 默认跟随屏幕
+        hs.addWidget(self.v_fps_combo, 0)
+        hs.addWidget(QLabel("画质:"))
+        self.v_crf_combo = QComboBox()
+        self.v_crf_combo.addItems(list(video_mod.CRF_PRESETS.keys()))
+        self.v_crf_combo.setCurrentText("标准")
+        hs.addWidget(self.v_crf_combo, 0)
+        hs.addStretch(1)
+        v.addLayout(hs)
+
         # 运行按钮 + 进度 + 取消
         hr = QHBoxLayout()
         self.v_run_btn = QPushButton("开始加水印"); self.v_run_btn.clicked.connect(self._v_run)
@@ -647,7 +721,9 @@ class App(QMainWindow):
         v.addWidget(self.v_progress)
         self.v_status_lbl = QLabel(
             "播放方式可选「固定 / 滚动 / 固定+滚动」；文字水印与图片水印还能各自单独指定，"
-            "因此可以做出「文字滚动 + 图片固定」等任意搭配。逐帧处理较长视频较慢属正常，原音轨会自动保留。")
+            "因此可以做出「文字滚动 + 图片固定」等任意搭配。"
+            "导出分辨率默认 1080P、帧率默认跟随屏幕，两者都不会超过你显示器的能力；"
+            "图片水印采用超采样渲染，放大导出时依然锐利。逐帧处理较长视频较慢属正常，原音轨会自动保留。")
         self.v_status_lbl.setWordWrap(True)
         v.addWidget(self.v_status_lbl)
         return g
@@ -691,6 +767,21 @@ class App(QMainWindow):
         if p:
             self.v_img_edit.setText(p)
 
+    def _v_out_spec(self):
+        """导出分辨率 (w, h)；不超过当前显示器可显示的上限。"""
+        idx = self.v_res_combo.currentIndex()
+        if 0 <= idx < len(self.v_res_items):
+            _lb, w, h = self.v_res_items[idx]
+            return w, h
+        return _screen_geometry()
+
+    def _v_out_fps(self):
+        idx = self.v_fps_combo.currentIndex()
+        return self.v_fps_items[idx] if (0 <= idx < len(self.v_fps_items)) else 60
+
+    def _v_out_crf(self):
+        return video_mod.CRF_PRESETS.get(self.v_crf_combo.currentText(), 18)
+
     def _v_pick_color(self):
         c = QColorDialog.getColor(QColor(*self.v_color), self, "选择水印文字颜色")
         if c.isValid():
@@ -728,6 +819,9 @@ class App(QMainWindow):
             "scroll_speed": self.v_speed_spin.value() / 100.0,
             "text": text_cfg,
             "image": image_cfg,
+            "out_size": self._v_out_spec(),
+            "fps": self._v_out_fps(),
+            "crf": self._v_out_crf(),
         }
         # 只有确实存在滚动图层时，滚动速度才可用（引擎侧会兜底，这里置 0 只是不再显示进度）
         if "scroll" not in video_mod._effective_motions(opts):
@@ -789,8 +883,16 @@ class App(QMainWindow):
         motions = video_mod._effective_motions(opts)
         desc = "+".join({"fixed": "固定", "scroll": "滚动"}.get(m, m) for m in motions)
         kinds_desc = "文字" if kinds == ["text"] else ("图片" if kinds == ["image"] else "文字+图片")
+        # 这里解包失败过一次（out_size 曾被解析成 3 元组）——即便异常也不能中断任务，
+        # 规格只影响提示文案，取不到就退化成不带数字的说明。
+        try:
+            ow, oh = opts["out_size"]
+            spec = f"{ow}×{oh} · {int(opts['fps'])}fps · crf{int(opts['crf'])}"
+        except Exception:
+            spec = "自定义"
         self.v_status_lbl.setText(
-            f"正在逐帧处理（{kinds_desc} · {desc}），请稍候（长视频较慢属正常）…")
+            f"正在逐帧处理（{kinds_desc} · {desc} · 导出 {spec}），"
+            f"请稍候（长视频较慢属正常）…")
 
         self.v_run_btn.setEnabled(False)
         self.v_cancel_btn.setEnabled(True)
