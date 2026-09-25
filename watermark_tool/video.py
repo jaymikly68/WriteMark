@@ -4,9 +4,12 @@
 能力：
 - 逐帧加水印：对视频的每一帧做合成，**绝不只改封面/关键帧**，因此极难被去除。
 - 水印类型：文字水印 与 图片水印（可单独或同时）。
-- 位置模式：
-  - "fixed"：固定在某一角/某一位置（默认右下）。
-  - "scroll"：横向滚动播放（水印自右向左循环移动，类似跑马灯）。
+- 播放方式（motion，可自由搭配）：
+  - "fixed" 固定在某一角/某一位置。
+  - "scroll" 横向滚动播放（水印自右向左循环移动，类似跑马灯）。
+  - "both" 固定+滚动：同一份水印同时保留固定副本与滚动副本，双重覆盖。
+- 文字与图片各自可单独选择播放方式与锚点位置，因此可以做出
+  “文字滚动 + 图片固定”“文字固定 + 图片固定（不同角）”等任意搭配。
 - 输出：mp4(H.264) 以兼容主流播放器；原视频的**音轨会被自动保留**（用随附的
   ffmpeg 二进制重新封装，不重新编码音频）。
 
@@ -66,23 +69,65 @@ def _build_image_layer(image_path: str, frame_w: int, frame_h: int, cfg: dict) -
     return layer
 
 
-def _layers_for_frame(frame_w: int, frame_h: int, kinds: list, text_cfg: dict, image_cfg: dict):
-    """返回本帧需要叠加的所有水印图层列表（文字 + 图片）。"""
-    layers = []
-    if "text" in kinds and text_cfg.get("text"):
-        layers.append(_build_text_layer(text_cfg["text"], frame_w, frame_h, text_cfg))
+def _layer_specs(frame_w: int, frame_h: int, kinds: list, text_cfg: dict, image_cfg: dict):
+    """返回本帧需要叠加的所有水印图层规格。
+
+    每项为 dict：{'kind', 'img', 'position'}。
+    position 取自该类型自己的配置（text.position / image.position），
+    因此文字与图片即使同时固定，也不会叠在同一处。
+    """
+    specs = []
+    if "text" in kinds and (text_cfg.get("text") or "").strip():
+        specs.append({
+            "kind": "text",
+            "img": _build_text_layer(text_cfg["text"], frame_w, frame_h, text_cfg),
+            "position": text_cfg.get("position"),
+        })
     if "image" in kinds and image_cfg.get("image_path"):
         if os.path.exists(image_cfg["image_path"]):
-            layers.append(_build_image_layer(image_cfg["image_path"], frame_w, frame_h, image_cfg))
-    return layers
+            specs.append({
+                "kind": "image",
+                "img": _build_image_layer(image_cfg["image_path"], frame_w, frame_h, image_cfg),
+                "position": image_cfg.get("position"),
+            })
+    return specs
+
+
+def _normalize_motion(motion):
+    """把用户选的播放方式解析成 ['fixed'] / ['scroll'] / ['fixed','scroll']。
+
+    兼容旧字段 mode='fixed'|'scroll' 以及 motion='fixed+scroll'|'both'|'all'。
+    传 '跟随'/'' /None 等“未指定”写法时返回 None，由调用方回落到全局播放方式。
+    """
+    raw = str(motion or "").strip().lower()
+    if raw in ("", "none", "跟随", "auto", "default"):
+        return None
+    if raw in ("both", "all", "fixed+scroll", "fixed_and_scroll", "固定+滚动"):
+        return ["fixed", "scroll"]
+    if raw in ("scroll", "scrolling", "滚动"):
+        return ["scroll"]
+    return ["fixed"]
+
+
+def _effective_motions(opts: dict) -> list:
+    """汇总本次实际会出现的播放方式（含类型级覆盖），用于 GUI 判断滚动速度是否可用。"""
+    kinds = [k for k in opts.get("kinds", []) if k in ("text", "image")]
+    motions = set(_normalize_motion(opts.get("motion", opts.get("mode", "fixed"))) or [])
+    for key in kinds:
+        per_type = (opts.get(key) or {}).get("motion")
+        resolved = _normalize_motion(per_type)
+        if resolved:
+            motions.update(resolved)
+    return sorted(motions)
 
 
 # ---------------------------------------------------------------------------
 # 位置计算
 # ---------------------------------------------------------------------------
-def _fixed_pos(layer_w: int, layer_h: int, frame_w: int, frame_h: int, position):
+def _fixed_pos(layer_w: int, layer_h: int, frame_w: int, frame_h: int,
+               position=None):
     """固定位置：position=(fx, fy) 为水印左上角相对帧的比例，0..1。"""
-    fx, fy = position if len(position) == 2 else (0.85, 0.85)
+    fx, fy = position if (position and len(position) == 2) else (0.85, 0.85)
     x = int(fx * frame_w)
     y = int(fy * frame_h)
     x = max(0, min(frame_w - layer_w, x))
@@ -91,12 +136,12 @@ def _fixed_pos(layer_w: int, layer_h: int, frame_w: int, frame_h: int, position)
 
 
 def _scroll_pos(layer_w: int, layer_h: int, frame_w: int, frame_h: int,
-                position, t_sec: float, scroll_speed: float):
+                position=None, t_sec: float = 0.0, scroll_speed: float = 0.12):
     """滚动位置：水印自右向左循环移动（跑马灯），纵向锚定在 position[1]。"""
     span = frame_w + layer_w
     phase = (t_sec * scroll_speed) % 1.0          # 0..1 循环
     x = int(frame_w - phase * span)               # 从右边缘滑到左边缘外
-    fy = position[1] if len(position) == 2 else 0.85
+    fy = position[1] if (position and len(position) == 2) else 0.85
     y = int(fy * frame_h)
     y = max(0, min(frame_h - layer_h, y))
     return x, y
@@ -112,13 +157,14 @@ def add_video_watermark(src: str, output: str, opts: dict,
 
     opts 关键字段：
       kinds        : 列表，含 'text' / 'image'（可同时）。
-      text         : 文字水印配置 dict（text/color/alpha/size_frac/angle/字体）。
-      image        : 图片水印配置 dict（image_path/alpha/img_frac/angle）。
-      mode         : 'fixed' 或 'scroll'（滚动播放）。
-      position     : (fx, fy) 比例，水印左上角锚点；fixed 模式下即固定位置，
-                     scroll 模式下为纵向锚点。
+      text         : 文字水印配置 dict（text/color/alpha/size_frac/angle/position/字体）。
+      image        : 图片水印配置 dict（image_path/alpha/img_frac/angle/position）。
+      motion       : 'fixed' 固定 / 'scroll' 滚动 / 'both' 固定+滚动（同一图层两份）。
+                     兼容旧字段 mode。
       scroll_speed : 滚动速度（每秒移动“帧宽”的比例，默认 0.12）。
-    返回 dict 含 output / frames / engine。
+    每个类型可用 position 单独指定锚点；缺省 (0.85, 0.85)。固定+滚动时该锚点
+    既是固定副本的位置，也是滚动副本的纵向锚点。
+    返回 dict 含 output / frames / engine / motion。
     """
     if not os.path.exists(src):
         raise FileNotFoundError(f"视频不存在: {src}")
@@ -128,9 +174,9 @@ def add_video_watermark(src: str, output: str, opts: dict,
         raise ValueError("未启用任何水印类型。")
     text_cfg = opts.get("text", {}) or {}
     image_cfg = opts.get("image", {}) or {}
-    mode = opts.get("mode", "fixed")
-    position = opts.get("position", (0.85, 0.85))
-    scroll_speed = float(opts.get("scroll_speed", 0.12))
+    # 播放方式：优先 motion，兼容旧字段 mode
+    motions = _normalize_motion(opts.get("motion", opts.get("mode", "fixed"))) or ["fixed"]
+    scroll_speed = float(opts.get("scroll_speed", 0.12) or 0.12)
 
     try:
         reader = iio.get_reader(src, "ffmpeg")
@@ -157,9 +203,17 @@ def add_video_watermark(src: str, output: str, opts: dict,
         total = 0
 
     # 水印图层与帧尺寸相关、但与帧内容无关：仅构造一次，循环里只换位置，省大量 CPU
-    layers = _layers_for_frame(W, H, kinds, text_cfg, image_cfg)
+    layers = _layer_specs(W, H, kinds, text_cfg, image_cfg)
     if not layers:
         raise ValueError("文字为空且未提供有效图片，无法生成水印。")
+    if scroll_speed <= 0:
+        # GUI 在无滚动图层时会传 0，这里兜底回默认速度，避免“开了滚动却不滚动”
+        scroll_speed = 0.12
+    # 每个图层可自带 motion 覆盖全局（实现“文字滚动 + 图片固定”这类自由搭配）
+    for spec in layers:
+        cfg = text_cfg if spec["kind"] == "text" else image_cfg
+        per_type = _normalize_motion(cfg.get("motion"))
+        spec["motions"] = per_type or list(motions)
 
     # 先写到临时无声视频，最后再 mux 原音轨
     tmp_fd, tmp_vid = tempfile.mkstemp(suffix=".mp4")
@@ -174,13 +228,20 @@ def add_video_watermark(src: str, output: str, opts: dict,
             # frame 多为 RGB uint8；统一转 RGBA 以便合成
             img = Image.fromarray(np.asarray(frame)).convert("RGBA")
             t_sec = frame_idx / fps
-            for layer in layers:
+            painted = set()   # “固定+滚动”下避免同一图层在完全相同坐标被叠加两次
+            for spec in layers:
+                layer = spec["img"]
                 lw, lh = layer.size
-                if mode == "scroll":
-                    x, y = _scroll_pos(lw, lh, W, H, position, t_sec, scroll_speed)
-                else:
-                    x, y = _fixed_pos(lw, lh, W, H, position)
-                img.alpha_composite(layer, (x, y))
+                pos = spec.get("position")
+                for motion in spec.get("motions") or motions:
+                    if motion == "scroll":
+                        x, y = _scroll_pos(lw, lh, W, H, pos, t_sec, scroll_speed)
+                    else:
+                        x, y = _fixed_pos(lw, lh, W, H, pos)
+                    if (x, y) in painted:
+                        continue
+                    painted.add((x, y))
+                    img.alpha_composite(layer, (x, y))
             writer.append_data(np.asarray(img.convert("RGB")))
             frame_idx += 1
             if progress_fn is not None and total:
@@ -214,7 +275,10 @@ def add_video_watermark(src: str, output: str, opts: dict,
         except Exception:
             pass
 
-    return {"ok": True, "engine": "video", "frames": frames_done, "output": output}
+    # 返回“实际生效”的播放方式合集：逐类型覆盖会让实际叠加方式多于全局选择
+    used = sorted({m for s in layers for m in (s.get("motions") or motions)})
+    return {"ok": True, "engine": "video", "frames": frames_done,
+            "output": output, "motion": "+".join(used)}
 
 
 def _mux_audio(tmp_vid: str, src: str, output: str) -> bool:

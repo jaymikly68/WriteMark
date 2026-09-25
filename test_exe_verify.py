@@ -260,7 +260,7 @@ def main():
         # 关键能力符号（模块级函数）必须编入
         has_video_api = ({"add_video_watermark", "watermark_video_formats",
                           "_mux_audio", "_scroll_pos", "_fixed_pos",
-                          "_layers_for_frame"} <= vnames)
+                          "_layer_specs", "_normalize_motion"} <= vnames)
         # 复用 engine_docx 的纯 PIL 文字/图片渲染（不依赖 Word）
         has_pil_reuse = ("engine_docx" in vnames
                          and ("render_text_png" in vnames or "render_text_png" in vconsts))

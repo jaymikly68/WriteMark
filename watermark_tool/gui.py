@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QPushButton, QLabel, QFileDialog, QComboBox, QCompleter,
     QDoubleSpinBox, QCheckBox, QSlider, QTextEdit, QColorDialog, QMessageBox,
     QScrollArea, QSystemTrayIcon, QMenu, QStyle, QProgressBar,
+    QButtonGroup, QRadioButton,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QStringListModel
 from PySide6.QtGui import QColor, QImage, QPixmap
@@ -56,6 +57,31 @@ BTN_HL = (
     "QPushButton:hover { background-color:#2b82f1; }"
     "QPushButton:pressed { background-color:#0b57d0; }"
 )
+
+# 视频水印锚点：位置名 -> (左上角相对帧的比例, 0..1)
+# 文字与图片各有独立一份，二者可错开，避免同时固定时完全重叠。
+_V_POSITIONS = {
+    "右下": (0.82, 0.85), "右上": (0.82, 0.08), "左下": (0.08, 0.85),
+    "左上": (0.08, 0.08), "居中": (0.35, 0.40),
+}
+_V_POSITIONS_KEYS = list(_V_POSITIONS.keys())
+
+# 播放方式 -> 引擎 motion 值（"跟随" 表示沿用全局单选）
+_V_MOTION_MAP = {
+    "固定": "fixed",
+    "滚动": "scroll",
+    "固定+滚动": "both",
+}
+_V_MOTION_LABELS = ["跟随", "固定", "滚动", "固定+滚动"]
+_V_MOTION_INVERSE = {v: k for k, v in _V_MOTION_MAP.items()}
+
+
+def _resolve_motion(combo, global_motion: str) -> str:
+    """类型级播放方式：选了就用选的，选“跟随”就用全局单选的值。"""
+    label = combo.currentText()
+    if label == "跟随":
+        return global_motion
+    return _V_MOTION_MAP.get(label, global_motion)
 
 
 class Worker(QThread):
@@ -518,11 +544,22 @@ class App(QMainWindow):
         b2 = QPushButton("浏览..."); b2.clicked.connect(self._v_browse_out); h2.addWidget(b2, 1)
         v.addLayout(h2)
 
-        # 水印类型
+        # 水印类型 + 各自的播放方式（可自由搭配）
         ht = QHBoxLayout()
         self.v_text_chk = QCheckBox("文字水印"); self.v_text_chk.setChecked(True)
+        self.v_text_motion_combo = QComboBox()
+        self.v_text_motion_combo.addItems(_V_MOTION_LABELS)
+        self.v_text_motion_combo.setCurrentText("跟随")
         self.v_img_chk = QCheckBox("图片水印")
-        ht.addWidget(self.v_text_chk); ht.addWidget(self.v_img_chk)
+        self.v_img_motion_combo = QComboBox()
+        self.v_img_motion_combo.addItems(_V_MOTION_LABELS)
+        self.v_img_motion_combo.setCurrentText("跟随")
+        ht.addWidget(self.v_text_chk); ht.addWidget(QLabel("播放方式:"))
+        ht.addWidget(self.v_text_motion_combo)
+        ht.addSpacing(12)
+        ht.addWidget(self.v_img_chk); ht.addWidget(QLabel("播放方式:"))
+        ht.addWidget(self.v_img_motion_combo)
+        ht.addStretch(1)
         v.addLayout(ht)
 
         # 文字水印参数
@@ -539,6 +576,8 @@ class App(QMainWindow):
         self.v_size_spin = QDoubleSpinBox(); self.v_size_spin.setRange(2, 20); self.v_size_spin.setValue(6)
         self.v_size_spin.setSuffix("%高"); hdr.addWidget(QLabel("字号:")); hdr.addWidget(self.v_size_spin)
         v.addLayout(hdr)
+        self.v_speed_spin = QDoubleSpinBox(); self.v_speed_spin.setRange(1, 50); self.v_speed_spin.setValue(12)
+        self.v_speed_spin.setSuffix("%/秒"); self.v_speed_spin.setEnabled(False)  # 纯固定时不相关
 
         # 图片水印参数
         hi = QHBoxLayout()
@@ -553,25 +592,47 @@ class App(QMainWindow):
         self.v_img_scale_spin.setSuffix("%宽"); hir.addWidget(QLabel("大小:")); hir.addWidget(self.v_img_scale_spin)
         v.addLayout(hir)
 
-        # 模式：固定 / 滚动
+        # 播放方式：固定 / 滚动 / 固定+滚动（单选，三者互斥）
         hm = QHBoxLayout()
-        hm.addWidget(QLabel("模式:"))
-        self.v_fixed_rb = QPushButton("固定位置"); self.v_fixed_rb.setCheckable(True); self.v_fixed_rb.setChecked(True)
-        self.v_scroll_rb = QPushButton("滚动播放"); self.v_scroll_rb.setCheckable(True)
-        self.v_fixed_rb.clicked.connect(lambda: (self.v_fixed_rb.setChecked(True), self.v_scroll_rb.setChecked(False)))
-        self.v_scroll_rb.clicked.connect(lambda: (self.v_scroll_rb.setChecked(True), self.v_fixed_rb.setChecked(False)))
-        hm.addWidget(self.v_fixed_rb); hm.addWidget(self.v_scroll_rb)
+        hm.addWidget(QLabel("播放方式:"))
+        self.v_motion_group = QButtonGroup(self)
+        self.v_motion_group.setExclusive(True)
+        self.v_motion_fixed = QRadioButton("固定")
+        self.v_motion_scroll = QRadioButton("滚动")
+        self.v_motion_both = QRadioButton("固定+滚动")
+        self.v_motion_group.addButton(self.v_motion_fixed, 0)
+        self.v_motion_group.addButton(self.v_motion_scroll, 1)
+        self.v_motion_group.addButton(self.v_motion_both, 2)
+        self.v_motion_fixed.setChecked(True)
+        for rb in (self.v_motion_fixed, self.v_motion_scroll, self.v_motion_both):
+            hm.addWidget(rb)
+        hm.addWidget(QLabel("（文字/图片可再单独指定，见上方）"))
         hm.addStretch(1)
         v.addLayout(hm)
+        # 改全局播放方式时，把两个“跟随”下拉同步过来，避免界面看起来不一致
+        self.v_motion_group.buttonClicked.connect(self._v_sync_motion_combos)
+        # 类型勾选 / 播放方式变动时，实时刷新「滚动速度」是否可用
+        self.v_text_chk.stateChanged.connect(self._v_refresh_motion_ui)
+        self.v_img_chk.stateChanged.connect(self._v_refresh_motion_ui)
+        self.v_motion_group.buttonClicked.connect(self._v_refresh_motion_ui)
+        self.v_text_motion_combo.currentTextChanged.connect(self._v_refresh_motion_ui)
+        self.v_img_motion_combo.currentTextChanged.connect(self._v_refresh_motion_ui)
+        self._v_refresh_motion_ui()   # 建完控件后再刷一次，保证初始态正确
 
-        # 位置 / 速度
+        # 位置 / 速度：文字与图片各自一个锚点，避免同位置完全重叠
         hp = QHBoxLayout()
-        hp.addWidget(QLabel("位置:"))
-        self.v_pos_combo = QComboBox()
-        self.v_pos_combo.addItems(["右下", "右上", "左下", "左上", "居中"])
-        hp.addWidget(self.v_pos_combo)
-        self.v_speed_spin = QDoubleSpinBox(); self.v_speed_spin.setRange(1, 50); self.v_speed_spin.setValue(12)
-        self.v_speed_spin.setSuffix("%/秒"); hp.addWidget(QLabel("滚动速度:")); hp.addWidget(self.v_speed_spin)
+        hp.addWidget(QLabel("文字位置:"))
+        self.v_text_pos_combo = QComboBox()
+        self.v_text_pos_combo.addItems(_V_POSITIONS_KEYS)
+        self.v_text_pos_combo.setCurrentText("右下")
+        hp.addWidget(self.v_text_pos_combo)
+        hp.addWidget(QLabel("图片位置:"))
+        self.v_img_pos_combo = QComboBox()
+        self.v_img_pos_combo.addItems(_V_POSITIONS_KEYS)
+        self.v_img_pos_combo.setCurrentText("左下")   # 与文字错位，默认不打架
+        hp.addWidget(self.v_img_pos_combo)
+        hp.addWidget(QLabel("滚动速度:"))
+        hp.addWidget(self.v_speed_spin)
         hp.addStretch(1)
         v.addLayout(hp)
 
@@ -584,14 +645,31 @@ class App(QMainWindow):
         v.addLayout(hr)
         self.v_progress = QProgressBar()
         v.addWidget(self.v_progress)
-        self.v_status_lbl = QLabel("选择视频后点击“开始加水印”。说明：逐帧处理较长视频较慢属正常；原音轨会自动保留。")
+        self.v_status_lbl = QLabel(
+            "播放方式可选「固定 / 滚动 / 固定+滚动」；文字水印与图片水印还能各自单独指定，"
+            "因此可以做出「文字滚动 + 图片固定」等任意搭配。逐帧处理较长视频较慢属正常，原音轨会自动保留。")
         self.v_status_lbl.setWordWrap(True)
         v.addWidget(self.v_status_lbl)
         return g
 
-    def _v_position(self):
-        return {"右下": (0.82, 0.85), "右上": (0.82, 0.08), "左下": (0.08, 0.85),
-                "左上": (0.08, 0.08), "居中": (0.35, 0.40)}[self.v_pos_combo.currentText()]
+    def _v_position(self, combo=None):
+        """取位置锚点：不传则取文字水印的位置；文字/图片各有独立锚点。"""
+        if combo is None:
+            combo = self.v_text_pos_combo
+        return _V_POSITIONS.get(combo.currentText(), (0.82, 0.85))
+
+    def _v_motion(self):
+        """把单选的播放方式映射为引擎 motion 值。"""
+        checked = self.v_motion_group.checkedButton()
+        label = checked.text() if checked else "固定"
+        return _V_MOTION_MAP.get(label, "fixed")
+
+    def _v_sync_motion_combos(self):
+        """全局播放方式变动时，让两个“跟随”下拉跟着走。"""
+        for combo in (getattr(self, "v_text_motion_combo", None),
+                      getattr(self, "v_img_motion_combo", None)):
+            if combo is not None and combo.currentText() == "跟随":
+                combo.setCurrentText(_V_MOTION_INVERSE.get(self._v_motion(), "跟随"))
 
     def _v_browse_src(self):
         p, _ = QFileDialog.getOpenFileName(self, "选择视频文件", "",
@@ -625,23 +703,46 @@ class App(QMainWindow):
             kinds.append("text")
         if self.v_img_chk.isChecked():
             kinds.append("image")
-        return {
-            "kinds": kinds,
-            "mode": "scroll" if self.v_scroll_rb.isChecked() else "fixed",
-            "position": self._v_position(),
-            "scroll_speed": self.v_speed_spin.value() / 100.0,
-            "text": {
-                "text": self.v_text_edit.text(),
-                "color": self.v_color,
-                "alpha": int(self.v_alpha_spin.value() / 100.0 * 255),
-                "size_frac": self.v_size_spin.value() / 100.0,
-            },
-            "image": {
-                "image_path": self.v_img_edit.text().strip(),
-                "alpha": int(self.v_img_alpha_spin.value() / 100.0 * 255),
-                "img_frac": self.v_img_scale_spin.value() / 100.0,
-            },
+        text_cfg = {
+            "text": self.v_text_edit.text(),
+            "color": self.v_color,
+            "alpha": int(self.v_alpha_spin.value() / 100.0 * 255),
+            "size_frac": self.v_size_spin.value() / 100.0,
+            "position": self._v_position(self.v_text_pos_combo),
         }
+        image_cfg = {
+            "image_path": self.v_img_edit.text().strip(),
+            "alpha": int(self.v_img_alpha_spin.value() / 100.0 * 255),
+            "img_frac": self.v_img_scale_spin.value() / 100.0,
+            "position": self._v_position(self.v_img_pos_combo),
+        }
+        global_motion = self._v_motion()
+        # 文字/图片各自可单独指定播放方式；选“跟随”时才用全局的
+        if "image" in kinds:
+            image_cfg["motion"] = _resolve_motion(self.v_img_motion_combo, global_motion)
+        if "text" in kinds:
+            text_cfg["motion"] = _resolve_motion(self.v_text_motion_combo, global_motion)
+        opts = {
+            "kinds": kinds,
+            "motion": global_motion,
+            "scroll_speed": self.v_speed_spin.value() / 100.0,
+            "text": text_cfg,
+            "image": image_cfg,
+        }
+        # 只有确实存在滚动图层时，滚动速度才可用（引擎侧会兜底，这里置 0 只是不再显示进度）
+        if "scroll" not in video_mod._effective_motions(opts):
+            opts["scroll_speed"] = 0
+        self._v_refresh_motion_ui()
+        return opts
+
+    def _v_refresh_motion_ui(self):
+        """按当前勾选，刷新「滚动速度」是否可用。"""
+        kinds = [k for k, chk in (("text", self.v_text_chk), ("image", self.v_img_chk))
+                 if chk.isChecked()]
+        opts = {"kinds": kinds, "motion": self._v_motion(),
+                "text": {"motion": _resolve_motion(self.v_text_motion_combo, self._v_motion())},
+                "image": {"motion": _resolve_motion(self.v_img_motion_combo, self._v_motion())}}
+        self.v_speed_spin.setEnabled("scroll" in video_mod._effective_motions(opts))
 
     def _v_run(self):
         # 冻结版没有控制台，槽函数里任何异常都会被 Qt 静默吞掉、表现为“点了没反应”，
@@ -676,15 +777,24 @@ class App(QMainWindow):
         if "image" in kinds and not self.v_img_edit.text().strip():
             QMessageBox.warning(self, "提示", "已启用图片水印，但还未选择水印图片。")
             return
+        if "text" in kinds and not self.v_text_edit.text().strip():
+            QMessageBox.warning(self, "提示", "已启用文字水印，但水印文字为空。")
+            return
         out = self.v_out_edit.text().strip()
         if not out:
             base, _ = os.path.splitext(src)
             out = base + "WaterMark.mp4"
             self.v_out_edit.setText(out)
+
+        motions = video_mod._effective_motions(opts)
+        desc = "+".join({"fixed": "固定", "scroll": "滚动"}.get(m, m) for m in motions)
+        kinds_desc = "文字" if kinds == ["text"] else ("图片" if kinds == ["image"] else "文字+图片")
+        self.v_status_lbl.setText(
+            f"正在逐帧处理（{kinds_desc} · {desc}），请稍候（长视频较慢属正常）…")
+
         self.v_run_btn.setEnabled(False)
         self.v_cancel_btn.setEnabled(True)
         self.v_progress.setValue(0)
-        self.v_status_lbl.setText("正在逐帧处理，请稍候（长视频较慢属正常）…")
         w = VideoWorker(src, out, opts)
         self._v_worker = w
         w.result_signal.connect(self._v_on_result)

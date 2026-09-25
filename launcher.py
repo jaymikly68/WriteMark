@@ -24,7 +24,7 @@ import subprocess
 import sys
 import zipfile
 
-APP_VERSION = "1.1.10"
+APP_VERSION = "1.2.0"
 APP_EXE_NAME = "WriteMarkApp.exe"
 PAYLOAD = "app_payload.zip"
 

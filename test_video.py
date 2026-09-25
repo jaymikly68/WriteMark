@@ -2,8 +2,11 @@
 
 覆盖：
 1) video.add_video_watermark 对合成视频逐帧加水印（固定 / 滚动），产出文件含水印像素、音轨 mux 不崩。
-2) engine_docx.detect_watermark_types 与 clear_watermark(kinds=...) 按类型清除正确。
-3) GUI _clear 在“文字+图片”共存时弹「想要去除水印？」并正确映射选项。
+2) 播放方式 x 水印类型 的搭配矩阵：固定 / 滚动 / 固定+滚动，以及逐类型覆盖
+   （如“文字固定 + 图片滚动”）；文字与图片各有独立位置锚点。
+3) engine_docx.detect_watermark_types 与 clear_watermark(kinds=...) 按类型清除正确。
+4) GUI _clear 在“文字+图片”共存时弹「想要去除水印？」并正确映射选项。
+5) GUI 视频分区的播放方式三选一与类型勾选能如实转成引擎参数。
 """
 import os
 import sys
@@ -48,13 +51,14 @@ def test_video_fixed_and_scroll():
 
     for mode in ("fixed", "scroll"):
         out = os.path.join(d, f"{mode}.mp4")
-        res = engine_run = None
         from watermark_tool import video
         res = video.add_video_watermark(src, out, {
-            "kinds": ["text", "image"], "mode": mode,
-            "text": {"text": "机密", "color": (255, 0, 0), "alpha": 200, "size_frac": 0.15},
-            "image": {"image_path": img, "alpha": 200, "img_frac": 0.18},
-            "position": (0.8, 0.8), "scroll_speed": 0.15,
+            "kinds": ["text", "image"], "motion": mode,
+            "text": {"text": "机密", "color": (255, 0, 0), "alpha": 200, "size_frac": 0.15,
+                     "position": (0.8, 0.8)},
+            "image": {"image_path": img, "alpha": 200, "img_frac": 0.18,
+                      "position": (0.1, 0.1)},
+            "scroll_speed": 0.15,
         })
         assert res["ok"], f"{mode} 处理失败: {res}"
         assert os.path.exists(out) and os.path.getsize(out) > 0
@@ -66,6 +70,72 @@ def test_video_fixed_and_scroll():
         assert red > 0, f"{mode} 末帧应含文字水印"
         assert blue > 0, f"{mode} 末帧应含图片水印"
     print("video 固定/滚动 端到端 PASS")
+
+
+def test_video_motion_matrix():
+    """播放方式 × 水印类型 的搭配矩阵必须全部可用且叠加正确。
+
+    覆盖：固定 / 滚动 / 固定+滚动，以及“文字固定+图片滚动”这类逐类型覆盖。
+    """
+    d = tempfile.mkdtemp()
+    src = os.path.join(d, "src.mp4")
+    img = os.path.join(d, "wm.png")
+    Image.new("RGBA", (60, 60), (0, 0, 255, 220)).save(img)
+    _make_video(src, W=200, H=140, N=30)
+
+    from watermark_tool import video
+
+    cases = [
+        # (名称, kinds, text位置, image位置, text motion, image motion, 期望 motion)
+        ("固定+文字", ["text"], (0.8, 0.8), None, "fixed", None, ["fixed"]),
+        ("滚动+图片", ["image"], None, (0.8, 0.8), None, "scroll", ["scroll"]),
+        ("固定+滚动+文字", ["text"], (0.8, 0.8), None, "both", None, ["fixed", "scroll"]),
+        ("固定+滚动+图片", ["image"], None, (0.8, 0.8), None, "both", ["fixed", "scroll"]),
+        ("文字固定+图片滚动+双类型", ["text", "image"], (0.8, 0.8), (0.05, 0.05),
+         "fixed", "scroll", ["fixed", "scroll"]),
+        ("文字滚动+图片固定+双类型", ["text", "image"], (0.8, 0.8), (0.05, 0.05),
+         "scroll", "fixed", ["fixed", "scroll"]),
+        ("跟随全局双图层", ["text", "image"], (0.8, 0.8), (0.05, 0.05),
+         "跟随", "跟随", ["fixed", "scroll"]),
+    ]
+    for name, kinds, tpos, ipos, tmotion, imotion, expect in cases:
+        text_cfg = {"text": "机密", "color": (255, 0, 0), "alpha": 220, "size_frac": 0.12}
+        image_cfg = {"image_path": img, "alpha": 220, "img_frac": 0.16}
+        if tpos:
+            text_cfg["position"] = tpos
+        if ipos:
+            image_cfg["position"] = ipos
+        if tmotion:
+            text_cfg["motion"] = tmotion
+        if imotion:
+            image_cfg["motion"] = imotion
+
+        out = os.path.join(d, f"{name.replace('+', 'p').replace(' ', '')}.mp4")
+        res = video.add_video_watermark(src, out, {
+            "kinds": kinds, "motion": "both",
+            "text": text_cfg, "image": image_cfg, "scroll_speed": 0.2,
+        })
+        assert res["ok"], f"{name} 处理失败: {res}"
+        assert res.get("motion") == "+".join(expect), \
+            f"{name}: 期望 motion={'+'.join(expect)}，实际 {res.get('motion')}"
+        assert os.path.exists(out) and os.path.getsize(out) > 0
+        fr = iio.get_reader(out, "ffmpeg").get_data(29)
+        red = int((fr[:, :, 0] > 150).sum())
+        blue = int((fr[:, :, 2] > 150).sum())
+        if "text" in kinds:
+            assert red > 0, f"{name} 末帧应含文字水印(红)，实际红={red}"
+        if "image" in kinds:
+            assert blue > 0, f"{name} 末帧应含图片水印(蓝)，实际蓝={blue}"
+        print(f"[{name}] motion={res.get('motion')} 红={red} 蓝={blue}")
+
+    # 归一化：motion 字段的所有写法都应收敛到合法值
+    assert video._normalize_motion("fixed") == ["fixed"]
+    assert video._normalize_motion("scroll") == ["scroll"]
+    for alias in ("both", "all", "fixed+scroll", "固定+滚动"):
+        assert video._normalize_motion(alias) == ["fixed", "scroll"], alias
+    # 旧字段 mode 仍被兼容
+    assert video._normalize_motion("scroll") == ["scroll"]
+    print("video 播放方式 x 水印类型 搭配矩阵 PASS")
 
 
 def test_docx_detect_and_clear_by_kind():
@@ -162,6 +232,11 @@ def test_gui_video_run_button_clicked(monkeypatch):
     w.v_text_chk.setChecked(True)
     w.v_img_chk.setChecked(False)
 
+    # 播放方式三选一必须齐备，且默认“固定”
+    assert w.v_motion_fixed.text() == "固定" and w.v_motion_scroll.text() == "滚动" \
+        and w.v_motion_both.text() == "固定+滚动"
+    assert w.v_motion_fixed.isChecked(), "默认播放方式应为「固定」"
+
     import time
     w._v_run()          # 直接走槽函数入口（含异常兜底）
     # 必须手动泵事件循环：worker 的 result/progress/finished 都是排队连接，
@@ -179,10 +254,70 @@ def test_gui_video_run_button_clicked(monkeypatch):
     print("GUI 视频「开始加水印」点击生效 PASS")
 
 
+def test_gui_motion_and_kind_matrix():
+    """GUI 侧：播放方式三选一 + 文字/图片类型搭配，_v_gather_opts 必须如实反映。"""
+    from watermark_tool.gui import App, _V_MOTION_MAP
+
+    app = QApplication.instance() or QApplication([])
+    w = App()
+
+    def pick(label):
+        for rb in (w.v_motion_fixed, w.v_motion_scroll, w.v_motion_both):
+            if rb.text() == label:
+                rb.setChecked(True)
+                return
+        raise AssertionError(f"找不到播放方式按钮：{label}")
+
+    img = os.path.join(tempfile.mkdtemp(), "wm.png")
+    Image.new("RGBA", (40, 40), (0, 0, 255, 200)).save(img)
+
+    w.v_text_chk.setChecked(True)
+    w.v_img_chk.setChecked(True)
+    w.v_img_edit.setText(img)
+
+    for label, expect in (("固定", "fixed"), ("滚动", "scroll"), ("固定+滚动", "both")):
+        pick(label)
+        opts = w._v_gather_opts()
+        assert opts["motion"] == expect, f"全局{label} -> {opts['motion']}，期望 {expect}"
+        # 两个下拉默认“跟随”，所以逐类型的 motion 也应是同一个值
+        assert opts["text"]["motion"] == expect, label
+        assert opts["image"]["motion"] == expect, label
+    # 只有滚动生效时，滚动速度才被保留；纯固定时应归零（引擎侧会有兜底）
+    pick("固定")
+    assert w._v_gather_opts()["scroll_speed"] == 0, "纯固定模式下滚动速度应为 0"
+
+    # 逐类型覆盖：文字固定 / 图片滚动（与全局“固定+滚动”并存也不冲突）
+    pick("固定+滚动")
+    w.v_text_motion_combo.setCurrentText("固定")
+    w.v_img_motion_combo.setCurrentText("滚动")
+    opts = w._v_gather_opts()
+    assert opts["motion"] == "both", "全局仍应是 fixed+scroll"
+    assert opts["text"]["motion"] == "fixed"
+    assert opts["image"]["motion"] == "scroll"
+    # 位置各自独立，避免同时固定时完全重叠
+    assert opts["text"]["position"] != opts["image"]["position"], \
+        "文字与图片应有各自的位置锚点"
+    assert opts["text"]["position"] in {(0.82, 0.85), (0.82, 0.08), (0.08, 0.85),
+                                        (0.08, 0.08), (0.35, 0.40)}
+    assert opts["image"]["position"] in {(0.82, 0.85), (0.82, 0.08), (0.08, 0.85),
+                                         (0.08, 0.08), (0.35, 0.40)}
+
+    # 只勾选文字时不拼图片配置进 kinds
+    w.v_img_chk.setChecked(False)
+    assert w._v_gather_opts()["kinds"] == ["text"]
+    # 一个都不勾选时应被 _v_run_inner 拦住
+    w.v_text_chk.setChecked(False)
+    assert w._v_gather_opts()["kinds"] == []
+    assert _V_MOTION_MAP["固定+滚动"] == "both"
+    print("GUI 播放方式 x 水印类型 搭配 PASS")
+
+
 if __name__ == "__main__":
     from pytest import MonkeyPatch
     test_video_fixed_and_scroll()
+    test_video_motion_matrix()
     test_docx_detect_and_clear_by_kind()
     test_gui_clear_choice_dialog(MonkeyPatch())
     test_gui_video_run_button_clicked(MonkeyPatch())
+    test_gui_motion_and_kind_matrix()
     print("\nALL PASS")
