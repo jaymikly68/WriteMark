@@ -394,11 +394,11 @@ class App(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("一键水印工具（Word / 视频）")
-        # 默认尺寸按屏幕自适应：内容最小宽度约 1.34k（三列并排 + 视频列控件），
-        # 旧默认 1200 会顶出横向滚动条，看起来像“界面少了一列/位置错乱”。
+        # 默认尺寸按屏幕自适应：内容最小宽度约 1.51k（左侧 Word 两列 + 右侧视频整列），
+        # 旧默认 1200/1400 会顶出横向滚动条，看起来像“界面少了一列/位置错乱”。
         _sw, _sh = _screen_geometry()
-        self.resize(max(1200, min(1400, int(_sw * 0.94))),
-                    max(720, min(920, int(_sh * 0.90))))
+        self.resize(max(1200, min(1560, int(_sw * 0.94))),
+                    max(720, min(940, int(_sh * 0.90))))
 
         self.file_path = ""
         self.text_enabled = True     # 文本水印默认启用
@@ -672,28 +672,12 @@ class App(QMainWindow):
                 if w > 0:
                     self.setFixedWidth(w)
 
-        # ---- 视频水印（与上方 Word 水印完全独立）----
-        f_video = self._build_video_section()
-
-        # ---------------- 文本/图像/视频水印横向并排，缩短整体纵向高度 ----------------
-        h_types = QHBoxLayout()
-        h_types.setSpacing(8)
-        h_types.addWidget(f_text, 0, Qt.AlignTop)     # 顶对齐：列高收缩到内容后不悬在行中间
-        h_types.addWidget(f_img, 0, Qt.AlignTop)
-        h_types.addWidget(f_video, 1)   # 视频列内容最多，多余宽度优先给它
-        root.addLayout(h_types)          # 下方紧跟主操作按钮行，再往下是防去除加固
-
-        h_action = QHBoxLayout()
-        h_action.setSpacing(8)
-        h_action.addWidget(_ColumnAlignedButton(self._btn_insert, f_text))
-        h_action.addWidget(_ColumnAlignedButton(self._btn_clear, f_img))
-        h_action.addStretch(1)          # 等同视频列占的剩余宽度，保证前两格与上方列对齐
-        root.addLayout(h_action)
-
-        # ---------------- 防去除加固（可选）
+        # ---------------- 防去除加固（可选）----------------
+        # 位置：嵌在「图像水印」列组框的**正下方**——该列内容比文本水印列矮，
+        # 这块正好补上两者的高度差；宽度自动等于图像水印列宽，视觉上与该列一体。
         f_hard = self._make_group("防去除加固（让水印更难被删掉）")
         vh = f_hard.layout()
-        self.tile_chk = QCheckBox("平铺满页水印（覆盖整页，PS/AI 修图难以抹除）")
+        self.tile_chk = QCheckBox("平铺满页水印（覆盖整页，难以抹除）")
         self.tile_chk.setChecked(self.tile)
         self.tile_chk.setToolTip(
             "把水印从“单个居中”改成整页多行多列平铺。\n"
@@ -715,7 +699,7 @@ class App(QMainWindow):
         row.addWidget(self.tile_cols_spin)
         row.addStretch(1)
         vh.addLayout(row)
-        self.redundant_chk = QCheckBox("多份冗余嵌入（页眉+页脚都写入，图形名不使用 watermark 字样）")
+        self.redundant_chk = QCheckBox("多份冗余嵌入（页眉+页脚都写入）")
         self.redundant_chk.setChecked(self.redundant)
         self.redundant_chk.setToolTip(
             "除页眉外，把水印也写进页脚；并把图形的显示名改成普通图片那样的名字。\n"
@@ -727,7 +711,7 @@ class App(QMainWindow):
         f_prev = self._make_group("水印预览（示意，脱离 Word 直接查看）")
         vp = f_prev.layout()
         self.preview_label = _DragLabel(); self.preview_label.setAlignment(Qt.AlignCenter)
-        # 与「防去除加固」并排后宽度充裕，预览图跟着放大（A4 比例约 1:1.414）
+        # 预览通栏后宽度充裕（横跨文本+图像两列），高度给足 A4 比例约 1:1.414 的可读尺寸
         self.preview_label.setMinimumSize(280, 400)
         self.preview_label.setStyleSheet("border:1px solid #bbb; background:#fafafa;")
         self.preview_label.setText("预览不可用")
@@ -748,11 +732,53 @@ class App(QMainWindow):
         # （历史上 QSizePolicy.Minimum 会吸收多余空间、把组标题顶到悬空）。
         f_hard.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         f_prev.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
-        h_lower = QHBoxLayout()
-        h_lower.setSpacing(8)
-        h_lower.addWidget(f_hard, 2, Qt.AlignTop)
-        h_lower.addWidget(f_prev, 3, Qt.AlignTop)
-        root.addLayout(h_lower)
+
+        # ---------------- 图像水印列 = 图像水印组框 + 其正下方的「防去除加固」----------------
+        # 两者同宽（同一列容器 → 自动等宽），竖直堆叠，与左侧文本水印列底部基本齐平。
+        col_img = QWidget()
+        vci = QVBoxLayout(col_img)
+        vci.setContentsMargins(0, 0, 0, 0)
+        vci.setSpacing(8)
+        vci.addWidget(f_img, 0, Qt.AlignTop)
+        vci.addWidget(f_hard, 0, Qt.AlignTop)
+        vci.addStretch(1)
+
+        # ---------------- 左侧 Word 区（竖直堆叠）：两列水印 → 通栏预览 → 主按钮行 ----------------
+        left = QWidget()
+        vl = QVBoxLayout(left)
+        vl.setContentsMargins(0, 0, 0, 0)
+        vl.setSpacing(8)
+
+        h_types = QHBoxLayout()
+        h_types.setSpacing(8)
+        h_types.addWidget(f_text, 0, Qt.AlignTop)     # 顶对齐：列高收缩到内容后不悬在行中间
+        h_types.addWidget(col_img, 0, Qt.AlignTop)
+        h_types.addStretch(1)          # 只占两列宽，剩余宽度整块留给右侧视频列
+        vl.addLayout(h_types)
+
+        # 水印预览：在左侧 Word 区内**通栏**（横跨文本+图像两列），不再与加固并排
+        vl.addWidget(f_prev)
+
+        h_action = QHBoxLayout()
+        h_action.setSpacing(8)
+        h_action.addWidget(_ColumnAlignedButton(self._btn_insert, f_text))
+        h_action.addWidget(_ColumnAlignedButton(self._btn_clear, f_img))
+        h_action.addStretch(1)         # 与上方两列严格对齐、且两按钮同一水平线
+        vl.addLayout(h_action)
+        vl.addStretch(1)
+
+        # ---------------- 视频水印：独立成**右侧一整列**，与左侧 Word 区并排 ----------------
+        f_video = self._build_video_section()
+
+        # 左区宽度「固定为两列自然宽」：Fixed 策略下不会去抢右侧视频列的横向空间，
+        # 多余宽度全部给视频列（否则左区会把空白吃掉，导致预览框被拉得极宽）。
+        left.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Maximum)
+
+        h_main = QHBoxLayout()
+        h_main.setSpacing(8)
+        h_main.addWidget(left, 0, Qt.AlignTop)
+        h_main.addWidget(f_video, 1)
+        root.addLayout(h_main)
 
         # 守护
         f_watch = self._make_group("后台守护（水印被删自动补回）")
@@ -2432,7 +2458,7 @@ def _bring_window_up(win):
     win.activateWindow()
 
 
-def _acquire_single_instance():
+def _acquire_single_instance(name=None):
     """本机只允许一个实例常驻（否则会同时存在多个后台守护，互相抢着补水印）。
 
     返回 (QLocalServer | None, should_exit)：
@@ -2440,7 +2466,12 @@ def _acquire_single_instance():
       - 抢到服务      → 返回 server，自己就是那个唯一实例；
       - QtNetwork 缺失或双方都失败 → 返回 (None, False)，宁可多开一个也
         不能让程序打不开。
+
+    name 默认取生产用的 SINGLE_INSTANCE_NAME；测试可传独立名字，
+    这样「机器上正跑着一个真实例」也不会把单例回归测试判成失败。
     """
+    if name is None:
+        name = SINGLE_INSTANCE_NAME
     try:
         from PySide6.QtNetwork import QLocalServer, QLocalSocket
     except Exception:
@@ -2450,7 +2481,7 @@ def _acquire_single_instance():
     # 不能反过来用 listen 结果判断——Windows 命名管道允许多实例同时 listen
     # 同名，第二次 listen 照样成功，那样会重复起出一个主实例。
     sock = QLocalSocket()
-    sock.connectToServer(SINGLE_INSTANCE_NAME)
+    sock.connectToServer(name)
     woke = sock.waitForConnected(300)
     if woke:                               # 已有实例在跑，通知它把窗口唤出来
         sock.write(b"show")
@@ -2460,9 +2491,9 @@ def _acquire_single_instance():
         return None, True
 
     # 没人应答 = 没有实例，也可能留了空壳记录；清掉后自己成为那一个
-    QLocalServer.removeServer(SINGLE_INSTANCE_NAME)
+    QLocalServer.removeServer(name)
     server = QLocalServer()
-    if server.listen(SINGLE_INSTANCE_NAME):
+    if server.listen(name):
         return server, False
     return None, False                     # 连不上又抢不到：宁可多开，也不能打不开
 
