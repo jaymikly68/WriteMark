@@ -247,16 +247,12 @@ def test_gui_export_spec_defaults_and_limits():
     disp_w, disp_h = _screen_geometry()
     rate = _screen_refresh_rate()
 
-    # 分辨率：480P/720P/1080P 是基础档，必须始终可选（默认 1080P）；
-    # 2K/4K 这类高阶档才按显示器上限裁剪。
+    # 分辨率：五档齐全（480P/720P/1080P/2K/4K），默认 1080P；
+    # 不再按显示器裁剪——导出分辨率只影响文件大小，用户有权主动选 4K。
     assert w.v_res_items, "至少应提供一个可选分辨率"
-    assert any(lb.startswith("1080P") for lb, _a, _b in w.v_res_items), \
-        "1080P 是默认档，必须始终提供"
-    BASE_H = {480, 720, 1080}
-    for lb, iw, ih in w.v_res_items:
-        if ih not in BASE_H:
-            assert iw <= disp_w and ih <= disp_h, \
-                f"高阶选项 {lb} 超过显示器上限 {disp_w}x{disp_h}"
+    for prefix in ("480P", "720P", "1080P", "2K", "4K"):
+        assert any(lb.startswith(prefix) for lb, _a, _b in w.v_res_items), \
+            f"缺少 {prefix} 档"
     idx1080 = [i for i, (lb, _a, _b) in enumerate(w.v_res_items) if lb.startswith("1080P")]
     assert w.v_res_combo.currentIndex() == idx1080[0], "默认导出分辨率应为 1080P"
     assert w.v_res_combo.count() == len(w.v_res_items), "分辨率下拉条目数应与数据一致"
@@ -265,24 +261,63 @@ def test_gui_export_spec_defaults_and_limits():
     assert w._v_out_spec() == w.v_res_items[w.v_res_combo.currentIndex()][1:], \
         "解析出的分辨率与界面选项不一致"
 
-    # 帧率：条目必须是 (label, fps) 二元组，且下拉不能出现空白项
-    # （v1.3.0 曾把 int 直接塞进 addItems，导致整个下拉显示为空）。
-    assert w.v_fps_items and all(isinstance(t, tuple) and len(t) == 2
+    # 帧率：档位集合固定为 60/120/144/165/240/300 Hz，默认取不超过屏幕刷新率的档；
+    # 条目必须是三元组，且下拉不能出现空白项（v1.3.0 曾把 int 直接 addItems）。
+    assert w.v_fps_items and all(isinstance(t, tuple) and len(t) == 3
                                  for t in w.v_fps_items), \
-        "帧率条目应为 (label, fps) 二元组"
-    for lb, f in w.v_fps_items:
-        assert f <= rate, f"帧率选项 {lb} 超过屏幕刷新率 {rate}"
+        "帧率条目应为 (label, fps, default_idx) 三元组"
+    fps_vals = [f for _lb, f, _d in w.v_fps_items]
+    assert fps_vals == [60, 120, 144, 165, 240, 300], f"帧率档位应为指定集合，实际 {fps_vals}"
     assert w.v_fps_combo.count() == len(w.v_fps_items), "帧率下拉条目数应与数据一致"
     for i in range(w.v_fps_combo.count()):
         assert w.v_fps_combo.itemText(i).strip(), \
             f"帧率下拉第 {i} 项为空（int 直接 addItems 会显示空白）"
-    assert w._v_out_fps() == max(v for _, v in w.v_fps_items), "默认帧率应跟随屏幕刷新率"
+    under = [f for f in fps_vals if f <= rate]
+    assert w._v_out_fps() == (max(under) if under else max(fps_vals)), \
+        "默认帧率应取不超过屏幕刷新率的那一档"
     assert w._v_out_crf() == video.CRF_PRESETS["标准"], "默认画质应为标准"
 
     ow, oh = w._v_out_spec()
     assert isinstance(ow, int) and isinstance(oh, int) and ow > 0 and oh > 0, \
         f"导出分辨率应为正整数，实际 {w._v_out_spec()}"
     print("GUI 导出规格默认与上限 PASS")
+
+
+def test_gui_custom_fps_input():
+    """自定义帧率输入框：合法值生效、越界/非数字被拒、切回预设时清除。"""
+    from watermark_tool import gui as gui_mod
+
+    app = QApplication.instance() or QApplication([])
+    w = gui_mod.App()
+
+    warned = []
+    real_warning = gui_mod.QMessageBox.warning
+    gui_mod.QMessageBox.warning = staticmethod(lambda *a, **k: warned.append(a))
+    try:
+        w.v_fps_custom_edit.setText("25")
+        w._v_apply_custom_fps()
+        assert w._v_out_fps() == 25, "自定义帧率应生效"
+
+        w.v_fps_custom_edit.setText("1000")          # 越界
+        w._v_apply_custom_fps()
+        assert warned, "越界帧率应给出提示"
+        assert w._v_out_fps() == 25, "非法帧率不应改变当前设置"
+
+        w.v_fps_custom_edit.setText("abc")           # 非数字
+        w._v_apply_custom_fps()
+        assert len(warned) >= 2, "非数字帧率应给出提示"
+        assert w._v_out_fps() == 25, "非法帧率不应改变当前设置"
+
+        # 切到任意一个"不同于当前"的预设档（注意不能直接 setCurrentIndex(0)，
+        # 屏幕刷新率取不到时默认档就是 0，同值赋值不会触发信号）
+        target = (w.v_fps_combo.currentIndex() + 1) % w.v_fps_combo.count()
+        w.v_fps_combo.setCurrentIndex(target)
+        assert w.v_fps_custom_value is None, "切回预设档位后应丢弃自定义帧率"
+        assert w._v_out_fps() == w.v_fps_items[target][1], \
+            "切换预设档后帧率应取该档位本身"
+    finally:
+        gui_mod.QMessageBox.warning = real_warning
+    print("自定义帧率输入 PASS")
 
 
 def test_docx_detect_and_clear_by_kind():

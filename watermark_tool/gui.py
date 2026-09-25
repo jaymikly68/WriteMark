@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QButtonGroup, QRadioButton,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QStringListModel
-from PySide6.QtGui import QColor, QImage, QPixmap
+from PySide6.QtGui import QColor, QImage, QPixmap, QIntValidator
 
 from . import core, watchdog, preview, word_fonts, engine_docx
 try:  # office_tweak 只依赖标准库，任何情况下缺了也不该拖垮整GUI
@@ -104,20 +104,16 @@ def _screen_geometry() -> tuple[int, int]:
 
 
 def _v_resolution_items() -> list[tuple[str, int, int]]:
-    """可选导出分辨率；480P/720P/1080P 为基础档始终提供，2K/4K 按显示器上限裁剪。
+    """可选导出分辨率；默认 1080P，2K/4K 一并提供。
 
-    基础三档不依赖显示器大小（视频导出与桌面显示是两回事，1080P 是
-    通用兼容档），这样才能保证"默认 1080P"永远成立；高阶档再严格
-    按显示器能力给，避免小屏导 4K 的浪费。
+    这里刻意不按显示器大小裁剪：导出分辨率与桌面显示是两回事，
+    4K 档只是文件更大，不影响播放兼容性，用户有权主动选。
     """
-    disp_w, disp_h = _screen_geometry()
-    base = [(f"480P（{854}×{480}）", 854, 480),
+    return [(f"480P（{854}×{480}）", 854, 480),
             (f"720P（{1280}×{720}）", 1280, 720),
-            (f"1080P（{1920}×{1080}）", 1920, 1080)]
-    high = [(f"2K（{2560}×{1440}）", 2560, 1440),
+            (f"1080P（{1920}×{1080}）", 1920, 1080),
+            (f"2K（{2560}×{1440}）", 2560, 1440),
             (f"4K（{3840}×{2160}）", 3840, 2160)]
-    items = list(base) + [p for p in high if p[1] <= disp_w and p[2] <= disp_h]
-    return items
 
 
 def _screen_refresh_rate() -> int:
@@ -131,21 +127,21 @@ def _screen_refresh_rate() -> int:
     return rate if rate > 0 else 60
 
 
-def _v_fps_items() -> list[tuple[str, int]]:
-    """可选帧率 (label, fps)；上限为用户屏幕刷新率，默认取最接近屏幕的那一档。
+def _v_fps_items() -> list[tuple[str, int, int]]:
+    """帧率档位 (label, fps, 默认索引)；默认取不超过屏幕刷新率的最大档。
 
-    必须返回 (label, value) 二元组：QComboBox.addItems 只认字符串，
-    直接塞 int 会得到一排空白下拉项（v1.3.0 的 bug）。
+    必须返回 (label, value, default_idx) 三元组：QComboBox.addItems 只认
+    字符串，直接塞 int 会得到一排空白下拉项（v1.3.0 的 bug）。
+    档位集合由用户指定，不给额外的"屏幕限高"（300Hz 一档允许存在），
+    非标准帧率请走旁边的自定义输入框。
     """
+    cands = [60, 120, 144, 165, 240, 300]
+    items = [(f"{f} Hz", f) for f in cands]
     rate = _screen_refresh_rate()
-    cands = [24, 25, 30, 48, 50, 60, 75, 90, 100, 120, 144, 165, 240, 360]
-    vals = [f for f in cands if f <= rate]
-    if not vals:                       # 刷新率低于 24 的罕见情况，直接给屏幕值
-        vals = [max(8, rate)]
-    elif rate not in vals:             # 高刷屏（如 155Hz）补上真实档位
-        vals.append(rate)
-        vals.sort()
-    return [(f"{f} fps", f) for f in vals]
+    under = [f for _lb, f in items if f <= rate]                # 不超过屏幕刷新率的档
+    default_fps = max(under) if under else cands[-1]
+    idx = next((i for i, (_lb, f) in enumerate(items) if f == default_fps), 0)
+    return [(lb, f, idx) for lb, f in items]
 
 
 class Worker(QThread):
@@ -700,23 +696,39 @@ class App(QMainWindow):
         hp.addStretch(1)
         v.addLayout(hp)
 
-        # 导出规格：分辨率 / 帧率 / 画质（均按用户显示器能力自动限高）
+        # 导出规格：分辨率 / 帧率（+自定义）/ 画质
         hs = QHBoxLayout()
         hs.addWidget(QLabel("导出分辨率:"))
         self.v_res_combo = QComboBox()
-        self.v_res_items = _v_resolution_items()          # 已按显示器上限裁剪
-        self.v_res_combo.addItems([t for t, _w, _h in self.v_res_items])
+        self.v_res_items = _v_resolution_items()
+        self.v_res_combo.addItems([lb for lb, _w, _h in self.v_res_items])
         if self.v_res_items:
             self.v_res_combo.setCurrentIndex(
                 min(2, len(self.v_res_items) - 1))        # 默认 1080P
         hs.addWidget(self.v_res_combo, 0)
         hs.addWidget(QLabel("帧率:"))
         self.v_fps_combo = QComboBox()
-        self.v_fps_items = _v_fps_items()                 # [(label, fps), ...]
-        self.v_fps_combo.addItems([lb for lb, _f in self.v_fps_items])
+        self.v_fps_items = _v_fps_items()                 # [(label, fps, idx), ...]
+        self.v_fps_combo.addItems([lb for lb, _f, _d in self.v_fps_items])
         if self.v_fps_items:
-            self.v_fps_combo.setCurrentIndex(len(self.v_fps_items) - 1)  # 默认跟随屏幕
+            self.v_fps_combo.setCurrentIndex(self.v_fps_items[0][2])
+        self.v_fps_custom_value = None                    # 自定义帧率，优先于下拉
+        self.v_fps_combo.currentIndexChanged.connect(self._v_clear_custom_fps)
         hs.addWidget(self.v_fps_combo, 0)
+        self.v_fps_custom_edit = QLineEdit()
+        self.v_fps_custom_edit.setPlaceholderText("自定义")
+        self.v_fps_custom_edit.setToolTip("直接输入帧率（1~300）后回车或点「应用」，"
+                                          "例如 25 / 50 / 100")
+        self.v_fps_custom_edit.setMaximumWidth(80)
+        # 校验器放宽到 9999，越界时交给 _v_apply_custom_fps 弹明确提示，
+        # 否则用户敲 1000 会被静默吃掉，搞不清到底哪儿不对
+        self.v_fps_custom_edit.setValidator(QIntValidator(1, 9999))
+        self.v_fps_custom_edit.returnPressed.connect(self._v_apply_custom_fps)
+        hs.addWidget(self.v_fps_custom_edit, 0)
+        self.v_fps_apply_btn = QPushButton("应用")
+        self.v_fps_apply_btn.setFixedWidth(60)
+        self.v_fps_apply_btn.clicked.connect(self._v_apply_custom_fps)
+        hs.addWidget(self.v_fps_apply_btn, 0)
         hs.addWidget(QLabel("画质:"))
         self.v_crf_combo = QComboBox()
         self.v_crf_combo.addItems(list(video_mod.CRF_PRESETS.keys()))
@@ -737,7 +749,8 @@ class App(QMainWindow):
         self.v_status_lbl = QLabel(
             "播放方式可选「固定 / 滚动 / 固定+滚动」；文字水印与图片水印还能各自单独指定，"
             "因此可以做出「文字滚动 + 图片固定」等任意搭配。"
-            "导出分辨率默认 1080P、帧率默认跟随屏幕，两者都不会超过你显示器的能力；"
+            "导出分辨率默认 1080P，可选至 4K；帧率可选 60/120/144/165/240/300 Hz，"
+            "默认取不超过你屏幕刷新率的那一档，非标准帧率可在右侧输入框直接填写（1~300）。"
             "图片水印采用超采样渲染，放大导出时依然锐利。逐帧处理较长视频较慢属正常，原音轨会自动保留。")
         self.v_status_lbl.setWordWrap(True)
         v.addWidget(self.v_status_lbl)
@@ -790,7 +803,29 @@ class App(QMainWindow):
             return w, h
         return _screen_geometry()
 
+    def _v_clear_custom_fps(self):
+        """改回预设档位时，丢弃用户此前输入的自定义帧率。"""
+        self.v_fps_custom_value = None
+
+    def _v_apply_custom_fps(self):
+        """解析自定义帧率输入框；非法值弹提示且不生效。"""
+        raw = self.v_fps_custom_edit.text().strip()
+        if not raw:
+            return
+        try:
+            val = int(raw)
+        except ValueError:
+            QMessageBox.warning(self, "帧率无效", "请输入 1~300 之间的整数帧率。")
+            return
+        if not 1 <= val <= 300:
+            QMessageBox.warning(self, "帧率无效", f"帧率需在 1~300 之间，当前为 {val}。")
+            return
+        self.v_fps_custom_value = val
+        self.v_fps_custom_edit.setStyleSheet("")          # 清掉可能的标红
+
     def _v_out_fps(self):
+        if self.v_fps_custom_value:                       # 自定义值优先
+            return self.v_fps_custom_value
         idx = self.v_fps_combo.currentIndex()
         if 0 <= idx < len(self.v_fps_items):
             return self.v_fps_items[idx][1]
