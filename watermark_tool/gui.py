@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QSystemTrayIcon, QMenu, QStyle, QProgressBar,
     QButtonGroup, QRadioButton,
 )
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QStringListModel
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QStringListModel, QEvent
 from PySide6.QtGui import QColor, QImage, QPixmap, QIntValidator
 
 from . import core, watchdog, preview, word_fonts, engine_docx
@@ -57,6 +57,53 @@ BTN_HL = (
     "QPushButton:hover { background-color:#2b82f1; }"
     "QPushButton:pressed { background-color:#0b57d0; }"
 )
+
+# 次操作按钮高亮样式：灰底黑字（视频水印的「取消」），与主操作（蓝底黑字）区分
+BTN_GRAY = (
+    "QPushButton {"
+    "  background-color:#9aa0a6; color:#000; font-weight:700;"
+    "  border:2px solid #5f6368; border-radius:6px;"
+    "  padding:8px 16px; min-height:34px;"
+    "}"
+    "QPushButton:hover { background-color:#adb5bd; }"
+    "QPushButton:pressed { background-color:#80868b; }"
+    "QPushButton:disabled {"
+    "  background-color:#e8eaed; color:#9aa0a6; border-color:#dadce0;"
+    "  font-weight:400; text-decoration:none;"
+    "}"
+)
+
+
+class _ProportionalButton(QPushButton):
+    """宽度按宿主容器宽度的固定比例自适应。
+
+    嵌在分组框内的主操作按钮需要「比所在分组框窄 20%」，但分组框宽度
+    在构造时还是 0（窗口尚未布局），用固定宽度会与实际宽度脱节。
+    这里监听宿主 Resize 事件持续同步，保证任何窗口宽度下比例都成立。
+    """
+
+    def __init__(self, text, host, ratio=0.8, minimum=88, host2=None, parent=None):
+        super().__init__(text, parent)
+        self._ratio = ratio
+        self._minimum = minimum
+        # 监听所有相关宿主：首次布局时各宿主的宽度是先后才定下来的，只监听一个
+        # 会让后建的那个沿用旧宽度（实测出现差 1px、甚至整体偏大的情况）。
+        self._hosts = [host] if host2 is None else [host, host2]
+        for h in self._hosts:
+            h.installEventFilter(self)
+        self._sync()
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Resize and any(obj is h for h in self._hosts):
+            self._sync()
+        return super().eventFilter(obj, event)
+
+    def _sync(self):
+        w = min((h.width() for h in self._hosts), default=0)
+        if w <= 0:
+            return
+        self.setFixedWidth(max(self._minimum, int(w * self._ratio)))
+
 
 # 视频水印锚点：位置名 -> (左上角相对帧的比例, 0..1)
 # 文字与图片各有独立一份，二者可错开，避免同时固定时完全重叠。
@@ -335,14 +382,6 @@ class App(QMainWindow):
         self.out_edit = QLineEdit(); self.out_edit.setPlaceholderText("默认保存到桌面/<原名>WaterMark.docx，可点击浏览修改")
         ho.addWidget(self.out_edit, 3)
         bout = QPushButton("浏览..."); bout.clicked.connect(self._browse_output); ho.addWidget(bout, 1)
-        # Word 主操作按钮并入 Word 区域：原先独占一整行时各占半宽、视觉上过大，
-        # 且和下面的视频区块割裂。现在紧跟在输出字段右侧，尺寸按内容自然收缩。
-        self._btn_insert = QPushButton("一键插入水印"); self._btn_insert.clicked.connect(self._insert)
-        self._btn_insert.setStyleSheet(BTN_HL); self._btn_insert.setFixedWidth(104)
-        ho.addWidget(self._btn_insert)
-        self._btn_clear = QPushButton("一键清除水印"); self._btn_clear.clicked.connect(self._clear)
-        self._btn_clear.setStyleSheet(BTN_HL); self._btn_clear.setFixedWidth(104)
-        ho.addWidget(self._btn_clear)
         ho.addStretch(1)
         root.addWidget(f_out)
         self.out_edit.textChanged.connect(self._on_output_changed)
@@ -412,6 +451,11 @@ class App(QMainWindow):
             self.text_ctrl_widgets.append(w)
         f_text.layout().addLayout(vt)
         f_text.layout().addStretch(1)   # 三列并排等高：余量沉底，避免标题被拉伸悬空
+        # 一键插入水印：挂在文本水印分组下方，宽度取分组宽度的 80%（比它短 20%）
+        self._btn_insert = _ProportionalButton("一键插入水印", f_text, ratio=0.8)
+        self._btn_insert.setStyleSheet(BTN_HL)
+        self._btn_insert.clicked.connect(self._insert)
+        f_text.layout().addWidget(self._btn_insert, 0, Qt.AlignLeft)
 
         # ---------------- 图像水印（可启用/禁用） ----------------
         f_img = self._make_group("图像水印")
@@ -457,6 +501,13 @@ class App(QMainWindow):
             self.img_ctrl_widgets.append(w)
         f_img.layout().addLayout(vi)
         f_img.layout().addStretch(1)    # 同上：三列等高时余量沉底
+        # 一键清除水印：挂在图像水印分组下方，宽度与「一键插入水印」保持一致
+        # host2=f_text：与「一键插入水印」共用同一宽度基准，保证两者严格等宽
+        self._btn_clear = _ProportionalButton("一键清除水印", f_img, ratio=0.8,
+                                              host2=f_text)
+        self._btn_clear.setStyleSheet(BTN_HL)
+        self._btn_clear.clicked.connect(self._clear)
+        f_img.layout().addWidget(self._btn_clear, 0, Qt.AlignLeft)
 
         # ---- 视频水印（与上方 Word 水印完全独立）----
         f_video = self._build_video_section()
@@ -468,9 +519,6 @@ class App(QMainWindow):
         h_types.addWidget(f_img)
         h_types.addWidget(f_video, 1)   # 视频列内容最多，多余宽度优先给它
         root.addLayout(h_types)
-
-        # ---------------- 按钮（插入/清除设为蓝底黑字高亮，突出主操作）----------------
-        # 主操作按钮已并入上方 Word 区域（输出字段右侧），这里不再单独占一行
 
         # ---------------- 防去除加固（可选）
         f_hard = self._make_group("防去除加固（让水印更难被删掉）")
@@ -747,7 +795,11 @@ class App(QMainWindow):
         hr = QHBoxLayout()
         self.v_run_btn = QPushButton("开始加水印"); self.v_run_btn.clicked.connect(self._v_run)
         self.v_run_btn.setStyleSheet(BTN_HL)          # 与主操作一致：蓝底黑字高亮
-        self.v_cancel_btn = QPushButton("取消"); self.v_cancel_btn.setEnabled(False); self.v_cancel_btn.clicked.connect(self._v_cancel)
+        # 取消 = 灰底黑字高亮（次操作），与主操作「开始加水印」的蓝底区分
+        self.v_cancel_btn = QPushButton("取消")
+        self.v_cancel_btn.setStyleSheet(BTN_GRAY)
+        self.v_cancel_btn.setEnabled(False)
+        self.v_cancel_btn.clicked.connect(self._v_cancel)
         hr.addWidget(self.v_run_btn); hr.addWidget(self.v_cancel_btn)
         v.addLayout(hr)
         self.v_progress = QProgressBar()
