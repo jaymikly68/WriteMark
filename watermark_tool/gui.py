@@ -240,7 +240,7 @@ class App(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("一键水印工具（Word / 视频）")
-        self.resize(880, 640)
+        self.resize(1200, 720)   # 三列并排后需要更宽，避免视频列文字被截断
 
         self.file_path = ""
         self.text_enabled = True     # 文本水印默认启用
@@ -402,6 +402,7 @@ class App(QMainWindow):
                   self.text_offy_slider, self.text_offy_spin):
             self.text_ctrl_widgets.append(w)
         f_text.layout().addLayout(vt)
+        f_text.layout().addStretch(1)   # 三列并排等高：余量沉底，避免标题被拉伸悬空
 
         # ---------------- 图像水印（可启用/禁用） ----------------
         f_img = self._make_group("图像水印")
@@ -446,12 +447,17 @@ class App(QMainWindow):
                   self.img_offy_slider, self.img_offy_spin):
             self.img_ctrl_widgets.append(w)
         f_img.layout().addLayout(vi)
+        f_img.layout().addStretch(1)    # 同上：三列等高时余量沉底
 
-        # ---------------- 文本/图像水印横向并排，缩短整体纵向高度 ----------------
+        # ---- 视频水印（与上方 Word 水印完全独立）----
+        f_video = self._build_video_section()
+
+        # ---------------- 文本/图像/视频水印横向并排，缩短整体纵向高度 ----------------
         h_types = QHBoxLayout()
         h_types.setSpacing(8)
         h_types.addWidget(f_text)
         h_types.addWidget(f_img)
+        h_types.addWidget(f_video, 1)   # 视频列内容最多，多余宽度优先给它
         root.addLayout(h_types)
 
         # ---------------- 按钮（插入/清除设为蓝底黑字高亮，突出主操作）----------------
@@ -578,12 +584,9 @@ class App(QMainWindow):
         self.tile_rows_spin.valueChanged.connect(self._on_harden_changed)
         self.tile_cols_spin.valueChanged.connect(self._on_harden_changed)
 
-        # ---- 视频水印（与上方 Word 水印完全独立）----
-        root.addWidget(self._build_video_section())
-
     def _build_video_section(self):
         """构建独立的“视频水印”区块：逐帧加文字/图片水印，支持固定位置或滚动播放。"""
-        g = self._make_group("视频水印（与 Word 水印完全独立 · 逐帧写入，极难去除）")
+        g = self._make_group("视频水印（与 Word 水印独立）")
         v = g.layout()
         v.setSpacing(6)
 
@@ -666,7 +669,6 @@ class App(QMainWindow):
         self.v_motion_fixed.setChecked(True)
         for rb in (self.v_motion_fixed, self.v_motion_scroll, self.v_motion_both):
             hm.addWidget(rb)
-        hm.addWidget(QLabel("（文字/图片可再单独指定，见上方）"))
         hm.addStretch(1)
         v.addLayout(hm)
         # 改全局播放方式时，把两个“跟随”下拉同步过来，避免界面看起来不一致
