@@ -249,6 +249,59 @@ def main():
         if not has_com_cleanup_ref:
             ok = False
 
+    # ---- 视频水印（v1.1.8）：与 Word 水印完全独立的模块 + 自带 ffmpeg 二进制 ----
+    video = mods.get("watermark_tool.video")
+    if video is None:
+        print("[缺失] watermark_tool.video 未在归档中找到")
+        ok = False
+    else:
+        vnames = collect_names(video)
+        vconsts = find_str_consts(video)
+        # 关键能力符号（模块级函数）必须编入
+        has_video_api = ({"add_video_watermark", "watermark_video_formats",
+                          "_mux_audio", "_scroll_pos", "_fixed_pos",
+                          "_layers_for_frame"} <= vnames)
+        # 复用 engine_docx 的纯 PIL 文字/图片渲染（不依赖 Word）
+        has_pil_reuse = ("engine_docx" in vnames
+                         and ("render_text_png" in vnames or "render_text_png" in vconsts))
+        # 逐帧合成/写帧的逻辑（区分于 Word 水印的实现）
+        has_frame_loop = "append_data" in vnames or any("逐帧" in c for c in vconsts)
+        print(f"watermark_tool.video: 视频水印 API(add_video_watermark/格式/滚动/固定/mux) -> {has_video_api}; "
+              f"复用 engine_docx 纯 PIL 渲染 -> {has_pil_reuse}; 逐帧合成/写帧 -> {has_frame_loop}")
+        if not has_video_api or not has_pil_reuse or not has_frame_loop:
+            ok = False
+
+    # ffmpeg 二进制：随包附带（imageio_ffmpeg 自带 ~70MB），视频解码/音频 mux 必需——
+    # 打包后若不随附，视频水印功能会因找不到解码器而失效。
+    # 注意：较新 PyInstaller 会把 datas 放到 onedir 的 _internal/ 子目录，
+    # 因此运行体目录与 payload zip 都要兼顾 _internal/ 前缀。
+    ff_found, ff_note = False, ""
+    app_dir = os.path.dirname(os.path.abspath(app_exe))
+    # 1) onedir 运行体目录里应存在 ffmpeg 二进制（可能在 _internal/ 下）
+    for cand in ("imageio_ffmpeg/binaries",
+                 "_internal/imageio_ffmpeg/binaries"):
+        ff_dir = os.path.join(app_dir, cand)
+        if os.path.isdir(ff_dir):
+            for fn in os.listdir(ff_dir):
+                if fn.startswith("ffmpeg") and fn.endswith(".exe"):
+                    ff_found, ff_note = True, f"运行体目录 {ff_dir}/{fn}"
+                    break
+        if ff_found:
+            break
+    # 2) 若运行体目录里没有（例如直接对启动器校验），再看启动器 payload zip
+    if not ff_found:
+        try:
+            with zipfile.ZipFile(app_exe) as z:
+                for n in z.namelist():
+                    if "imageio_ffmpeg/binaries/ffmpeg" in n:
+                        ff_found, ff_note = True, f"payload zip 内 {n}"
+                        break
+        except Exception:
+            pass
+    print(f"ffmpeg 二进制随包附带(视频解码/音频保留) -> {ff_found}  ({ff_note})")
+    if not ff_found:
+        ok = False
+
     if len(sys.argv) <= 1:
         # 未指定参数时，连同启动器一起校验
         if not verify_launcher(os.path.join("dist", "WordWatermark.exe")):

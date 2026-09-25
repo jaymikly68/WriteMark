@@ -21,16 +21,21 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLineEdit, QPushButton, QLabel, QFileDialog, QComboBox, QCompleter,
     QDoubleSpinBox, QCheckBox, QSlider, QTextEdit, QColorDialog, QMessageBox,
-    QScrollArea, QSystemTrayIcon, QMenu, QStyle,
+    QScrollArea, QSystemTrayIcon, QMenu, QStyle, QProgressBar,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QStringListModel
 from PySide6.QtGui import QColor, QImage, QPixmap
 
-from . import core, watchdog, preview, word_fonts
+from . import core, watchdog, preview, word_fonts, engine_docx
 try:  # office_tweak 只依赖标准库，任何情况下缺了也不该拖垮整GUI
     from . import office_tweak as otw
 except Exception:  # pragma: no cover
     otw = None
+try:  # 视频水印：imageio + imageio-ffmpeg（自带 ffmpeg 二进制）；缺了则视频页不可用但不拖垮整GUI
+    from . import video as video_mod
+    import imageio_ffmpeg  # noqa: F401  确保 ffmpeg 二进制可被打包收集
+except Exception:  # pragma: no cover
+    video_mod = None
 
 
 class Worker(QThread):
@@ -92,6 +97,33 @@ class FontWorker(QThread):
             self.error_signal.emit(str(e))
 
 
+class VideoWorker(QThread):
+    """后台逐帧处理视频水印：支持进度回传与中途取消。"""
+    result_signal = Signal(bool, str)
+    progress_signal = Signal(int, int)   # (当前帧, 总帧数)
+
+    def __init__(self, src, output, opts):
+        super().__init__()
+        self.src = src
+        self.output = output
+        self.opts = opts
+        self._stop = False
+
+    def request_stop(self):
+        self._stop = True
+
+    def run(self):
+        try:
+            res = video_mod.add_video_watermark(
+                self.src, self.output, self.opts,
+                progress_fn=lambda c, t: self.progress_signal.emit(c, t),
+                stop_check=lambda: self._stop,
+            )
+            self.result_signal.emit(True, str(res))
+        except Exception as e:
+            self.result_signal.emit(False, str(e))
+
+
 class App(QMainWindow):
     # 线程安全日志信号（必须在类级别声明）
     log_signal = Signal(str)
@@ -99,7 +131,7 @@ class App(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Word 一键水印工具")
+        self.setWindowTitle("一键水印工具（Word / 视频）")
         self.resize(880, 640)
 
         self.file_path = ""
@@ -446,6 +478,209 @@ class App(QMainWindow):
         self.tile_chk.stateChanged.connect(self._on_harden_changed)
         self.tile_rows_spin.valueChanged.connect(self._on_harden_changed)
         self.tile_cols_spin.valueChanged.connect(self._on_harden_changed)
+
+        # ---- 视频水印（与上方 Word 水印完全独立）----
+        root.addWidget(self._build_video_section())
+
+    def _build_video_section(self):
+        """构建独立的“视频水印”区块：逐帧加文字/图片水印，支持固定位置或滚动播放。"""
+        g = self._make_group("视频水印（与 Word 水印完全独立 · 逐帧写入，极难去除）")
+        v = g.layout()
+        v.setSpacing(6)
+
+        if video_mod is None:
+            v.addWidget(QLabel("⚠ 视频依赖 imageio / imageio-ffmpeg 未安装，视频功能不可用。"))
+            return g
+
+        # 源视频 / 输出
+        h1 = QHBoxLayout()
+        self.v_src_edit = QLineEdit(); self.v_src_edit.setPlaceholderText("选择视频文件（mp4 / mkv / avi / mov / wmv …）")
+        h1.addWidget(self.v_src_edit, 3)
+        b1 = QPushButton("浏览..."); b1.clicked.connect(self._v_browse_src); h1.addWidget(b1, 1)
+        v.addLayout(h1)
+        h2 = QHBoxLayout()
+        h2.addWidget(QLabel("输出:"))
+        self.v_out_edit = QLineEdit(); self.v_out_edit.setPlaceholderText("默认 <原名>WaterMark.mp4，可修改")
+        h2.addWidget(self.v_out_edit, 3)
+        b2 = QPushButton("浏览..."); b2.clicked.connect(self._v_browse_out); h2.addWidget(b2, 1)
+        v.addLayout(h2)
+
+        # 水印类型
+        ht = QHBoxLayout()
+        self.v_text_chk = QCheckBox("文字水印"); self.v_text_chk.setChecked(True)
+        self.v_img_chk = QCheckBox("图片水印")
+        ht.addWidget(self.v_text_chk); ht.addWidget(self.v_img_chk)
+        v.addLayout(ht)
+
+        # 文字水印参数
+        htt = QHBoxLayout()
+        htt.addWidget(QLabel("文字:"))
+        self.v_text_edit = QLineEdit("机密 CONFIDENTIAL"); htt.addWidget(self.v_text_edit, 3)
+        self.v_color = (255, 255, 255)
+        self.v_color_btn = QPushButton("颜色: 白"); self.v_color_btn.clicked.connect(self._v_pick_color)
+        htt.addWidget(self.v_color_btn, 1)
+        v.addLayout(htt)
+        hdr = QHBoxLayout()
+        self.v_alpha_spin = QDoubleSpinBox(); self.v_alpha_spin.setRange(0, 100); self.v_alpha_spin.setValue(70)
+        self.v_alpha_spin.setSuffix("%"); hdr.addWidget(QLabel("透明度:")); hdr.addWidget(self.v_alpha_spin)
+        self.v_size_spin = QDoubleSpinBox(); self.v_size_spin.setRange(2, 20); self.v_size_spin.setValue(6)
+        self.v_size_spin.setSuffix("%高"); hdr.addWidget(QLabel("字号:")); hdr.addWidget(self.v_size_spin)
+        v.addLayout(hdr)
+
+        # 图片水印参数
+        hi = QHBoxLayout()
+        self.v_img_edit = QLineEdit(); self.v_img_edit.setPlaceholderText("水印图片路径（可选）")
+        hi.addWidget(self.v_img_edit, 3)
+        bi = QPushButton("选择图片..."); bi.clicked.connect(self._v_browse_img); hi.addWidget(bi, 1)
+        v.addLayout(hi)
+        hir = QHBoxLayout()
+        self.v_img_alpha_spin = QDoubleSpinBox(); self.v_img_alpha_spin.setRange(0, 100); self.v_img_alpha_spin.setValue(70)
+        self.v_img_alpha_spin.setSuffix("%"); hir.addWidget(QLabel("透明度:")); hir.addWidget(self.v_img_alpha_spin)
+        self.v_img_scale_spin = QDoubleSpinBox(); self.v_img_scale_spin.setRange(5, 60); self.v_img_scale_spin.setValue(15)
+        self.v_img_scale_spin.setSuffix("%宽"); hir.addWidget(QLabel("大小:")); hir.addWidget(self.v_img_scale_spin)
+        v.addLayout(hir)
+
+        # 模式：固定 / 滚动
+        hm = QHBoxLayout()
+        hm.addWidget(QLabel("模式:"))
+        self.v_fixed_rb = QPushButton("固定位置"); self.v_fixed_rb.setCheckable(True); self.v_fixed_rb.setChecked(True)
+        self.v_scroll_rb = QPushButton("滚动播放"); self.v_scroll_rb.setCheckable(True)
+        self.v_fixed_rb.clicked.connect(lambda: (self.v_fixed_rb.setChecked(True), self.v_scroll_rb.setChecked(False)))
+        self.v_scroll_rb.clicked.connect(lambda: (self.v_scroll_rb.setChecked(True), self.v_fixed_rb.setChecked(False)))
+        hm.addWidget(self.v_fixed_rb); hm.addWidget(self.v_scroll_rb)
+        hm.addStretch(1)
+        v.addLayout(hm)
+
+        # 位置 / 速度
+        hp = QHBoxLayout()
+        hp.addWidget(QLabel("位置:"))
+        self.v_pos_combo = QComboBox()
+        self.v_pos_combo.addItems(["右下", "右上", "左下", "左上", "居中"])
+        hp.addWidget(self.v_pos_combo)
+        self.v_speed_spin = QDoubleSpinBox(); self.v_speed_spin.setRange(1, 50); self.v_speed_spin.setValue(12)
+        self.v_speed_spin.setSuffix("%/秒"); hp.addWidget(QLabel("滚动速度:")); hp.addWidget(self.v_speed_spin)
+        hp.addStretch(1)
+        v.addLayout(hp)
+
+        # 运行按钮 + 进度 + 取消
+        hr = QHBoxLayout()
+        self.v_run_btn = QPushButton("开始加水印"); self.v_run_btn.clicked.connect(self._v_run)
+        self.v_cancel_btn = QPushButton("取消"); self.v_cancel_btn.setEnabled(False); self.v_cancel_btn.clicked.connect(self._v_cancel)
+        hr.addWidget(self.v_run_btn); hr.addWidget(self.v_cancel_btn)
+        v.addLayout(hr)
+        self.v_progress = QProgressBar()
+        v.addWidget(self.v_progress)
+        self.v_status_lbl = QLabel("选择视频后点击“开始加水印”。说明：逐帧处理较长视频较慢属正常；原音轨会自动保留。")
+        self.v_status_lbl.setWordWrap(True)
+        v.addWidget(self.v_status_lbl)
+        return g
+
+    def _v_position(self):
+        return {"右下": (0.82, 0.85), "右上": (0.82, 0.08), "左下": (0.08, 0.85),
+                "左上": (0.08, 0.08), "居中": (0.35, 0.40)}[self.v_pos_combo.currentText()]
+
+    def _v_browse_src(self):
+        p, _ = QFileDialog.getOpenFileName(self, "选择视频文件", "",
+                                           "视频 (*.mp4 *.mkv *.avi *.mov *.wmv *.flv *.webm *.mpeg *.mpg *.ts *.m4v *.3gp);;All (*.*)")
+        if p:
+            self.v_src_edit.setText(p)
+            if not self.v_out_edit.text().strip():
+                base, _ = os.path.splitext(p)
+                self.v_out_edit.setText(base + "WaterMark.mp4")
+
+    def _v_browse_out(self):
+        p, _ = QFileDialog.getSaveFileName(self, "选择输出视频", "", "MP4 (*.mp4);;All (*.*)")
+        if p:
+            self.v_out_edit.setText(p)
+
+    def _v_browse_img(self):
+        p, _ = QFileDialog.getOpenFileName(self, "选择水印图片", "",
+                                           "图片 (*.png *.jpg *.jpeg *.bmp *.gif);;All (*.*)")
+        if p:
+            self.v_img_edit.setText(p)
+
+    def _v_pick_color(self):
+        c = QColorDialog.getColor(QColor(*self.v_color), self, "选择水印文字颜色")
+        if c.isValid():
+            self.v_color = (c.red(), c.green(), c.blue())
+            self.v_color_btn.setText(f"颜色: RGB{self.v_color}")
+
+    def _v_gather_opts(self):
+        kinds = []
+        if self.v_text_chk.isChecked():
+            kinds.append("text")
+        if self.v_img_chk.isChecked():
+            kinds.append("image")
+        return {
+            "kinds": kinds,
+            "mode": "scroll" if self.v_scroll_rb.isChecked() else "fixed",
+            "position": self._v_position(),
+            "scroll_speed": self.v_speed_spin.value() / 100.0,
+            "text": {
+                "text": self.v_text_edit.text(),
+                "color": self.v_color,
+                "alpha": int(self.v_alpha_spin.value() / 100.0 * 255),
+                "size_frac": self.v_size_spin.value() / 100.0,
+            },
+            "image": {
+                "image_path": self.v_img_edit.text().strip(),
+                "alpha": int(self.v_img_alpha_spin.value() / 100.0 * 255),
+                "img_frac": self.v_img_scale_spin.value() / 100.0,
+            },
+        }
+
+    def _v_run(self):
+        src = self.v_src_edit.text().strip()
+        if not src or not os.path.exists(src):
+            QMessageBox.warning(self, "提示", "请先选择有效的视频文件。")
+            return
+        kinds = [k for k in self._v_gather_opts()["kinds"]]
+        if not kinds:
+            QMessageBox.warning(self, "提示", "请至少启用一种水印（文字或图片）。")
+            return
+        if "image" in kinds and not self.v_img_edit.text().strip():
+            QMessageBox.warning(self, "提示", "已启用图片水印，但还未选择水印图片。")
+            return
+        out = self.v_out_edit.text().strip()
+        if not out:
+            base, _ = os.path.splitext(src)
+            out = base + "WaterMark.mp4"
+            self.v_out_edit.setText(out)
+        opts = self.v_gather_opts()
+        self.v_run_btn.setEnabled(False)
+        self.v_cancel_btn.setEnabled(True)
+        self.v_progress.setValue(0)
+        self.v_status_lbl.setText("正在逐帧处理，请稍候（长视频较慢属正常）…")
+        w = VideoWorker(src, out, opts)
+        self._v_worker = w
+        w.result_signal.connect(self._v_on_result)
+        w.progress_signal.connect(self._v_on_progress)
+        w.finished.connect(self._v_on_finished)
+        w.start()
+
+    def _v_on_progress(self, cur, total):
+        if total:
+            pct = int(cur / total * 100)
+            self.v_progress.setValue(pct)
+            self.v_status_lbl.setText(f"处理中：{cur}/{total} 帧（{pct}%）")
+
+    def _v_on_result(self, ok, msg):
+        if ok:
+            self.v_status_lbl.setText("任务已完成：" + msg)
+            QMessageBox.information(self, "任务已完成", "任务已完成")
+        else:
+            self.v_status_lbl.setText("失败：" + msg)
+            QMessageBox.critical(self, "失败", msg)
+
+    def _v_on_finished(self):
+        self._v_worker = None
+        self.v_run_btn.setEnabled(True)
+        self.v_cancel_btn.setEnabled(False)
+
+    def _v_cancel(self):
+        if getattr(self, "_v_worker", None) and self._v_worker.isRunning():
+            self._v_worker.request_stop()
+            self.v_status_lbl.setText("已请求取消，正在收尾…")
 
     def _make_group(self, title):
         """生成一个带标题的边框分组容器，返回该 QWidget（其 layout 已建好、垂直）。"""
@@ -1135,7 +1370,41 @@ class App(QMainWindow):
         if not out:
             out = core.default_output_path(self.file_path)
             self.out_edit.setText(out)
-        self._run(lambda: core.clear_watermark(self.file_path, output_path=out))
+        kinds = None
+        # 仅对 .docx 检测：若文档同时含有“文字水印”和“图片水印”，弹窗让用户二选一/全选
+        if not core._use_com(self.file_path):
+            try:
+                types = engine_docx.detect_watermark_types(self.file_path)
+                if types == {"text", "image"}:
+                    choice = self._ask_clear_choice()
+                    if choice is None:        # 用户点了“取消”
+                        return
+                    kinds = {"text": ["text"], "image": ["image"],
+                             "both": ["text", "image"]}[choice]
+            except Exception:
+                kinds = None
+        self._run(lambda: core.clear_watermark(self.file_path, output_path=out, kinds=kinds))
+
+    def _ask_clear_choice(self):
+        """文档同时含文字/图片水印时弹出选择框，返回 'text' / 'image' / 'both' / None(取消)。"""
+        box = QMessageBox(self)
+        box.setWindowTitle("想要去除水印？")
+        box.setIcon(QMessageBox.Question)
+        box.setText("该文档同时含有文字水印与图片水印，请选择要去除哪一种：")
+        btn_text = box.addButton("去除文字水印", QMessageBox.ActionRole)
+        btn_img = box.addButton("去除图片水印", QMessageBox.ActionRole)
+        btn_both = box.addButton("文字和图片水印都去除", QMessageBox.ActionRole)
+        box.addButton("取消", QMessageBox.RejectRole)
+        box.setDefaultButton(btn_both)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is btn_text:
+            return "text"
+        if clicked is btn_img:
+            return "image"
+        if clicked is btn_both:
+            return "both"
+        return None
 
     def _toggle_watch(self, state):
         if self.watch_chk.isChecked():

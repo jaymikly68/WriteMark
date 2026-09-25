@@ -34,9 +34,8 @@ _QT_UNUSED = [
 
 # ---- 其它用不到的大件 / 杂项 ----
 _OTHER_UNUSED = [
-    "numpy",                 # 本工具完全不使用 numpy，随包进来的 47MB 纯属浪费
-    "numpy.libs",
-    "scipy", "pandas", "matplotlib", "imageio", "imageio_ffmpeg", "PIL.ImageQt",
+    # 注意：numpy / imageio / imageio_ffmpeg 已被视频水印功能使用，严禁排除！
+    "scipy", "pandas", "matplotlib", "PIL.ImageQt",
     "PIL.ImageTk", "PIL.ImageShow", "PIL.ImageGrab", "PIL._tkinter_finder",
     "tkinter", "turtle", "sqlite3", "unittest", "doctest", "pydoc", "pdb",
     "pytest", "IPython", "notebook", "jupyter", "setuptools", "pip", "wheel",

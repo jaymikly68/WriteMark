@@ -106,9 +106,10 @@ def insert_watermark(src_path: str, kinds, output_path: str = None, **opts) -> d
     return res
 
 
-def clear_watermark(src_path: str, output_path: str = None) -> dict:
+def clear_watermark(src_path: str, output_path: str = None, kinds: list = None) -> dict:
     """
     清除水印。同样默认【不破坏原文件】：复制到 output_path 后在副本上清除。
+    kinds 给定（'text'/'image'）时只清除指定类型（仅 .docx 生效，.doc 仍整文档清除）。
     """
     src_path = os.path.abspath(src_path)
     _ensure_not_locked(src_path)
@@ -126,7 +127,7 @@ def clear_watermark(src_path: str, output_path: str = None) -> dict:
         res = engine_com.clear_watermark(src_path, output_path=output_path)
     else:
         shutil.copy2(src_path, output_path)  # 保留原文件，在新副本上清除水印
-        res = engine_docx.clear_watermark(output_path)
+        res = engine_docx.clear_watermark(output_path, kinds=kinds)
     if isinstance(res, dict):
         res["output"] = output_path
     return res

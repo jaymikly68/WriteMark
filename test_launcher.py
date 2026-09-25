@@ -18,7 +18,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-TITLE = "Word 一键水印工具"
+TITLE = "一键水印工具（Word / 视频）"
 APP_EXE_NAME = "WriteMarkApp.exe"
 # 版本号必须与 launcher.py 保持一致：写死会随着版本演进而失配（曾在 1.1.7 踩过）
 from launcher import APP_VERSION as VERSION

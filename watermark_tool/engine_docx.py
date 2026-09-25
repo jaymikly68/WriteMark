@@ -607,12 +607,46 @@ def insert_watermark(path: str, kinds, **opts) -> dict:
             "tile": tile, "redundant": redundant}
 
 
-def clear_watermark(path: str) -> dict:
-    """清除 .docx 中的水印：本工具添加的“以及”Word 原生的（衬于文字下方的图形）。
+def detect_watermark_types(path: str) -> set:
+    """检测文档里存在哪些“本工具添加”的水印类型。
 
-    既能清掉本工具留下的文本/图像水印，也能清掉原本就带水印的 Word 文档。
+    返回集合，元素是 'text' / 'image' 的子集（可能同时含两者）。
+    仅识别带本工具私有标记（MARK_TEXT / MARK_IMG）的图形——不把正文、
+    用户图片、Word 原生水印误判为本工具水印。
     """
     document = Document(path)
+    found = set()
+    for section in document.sections:
+        for part in _iter_parts(document, section, include_footers=True):
+            for drawing in part._element.iter(qn("w:drawing")):
+                mark = _mark_of(drawing)
+                if mark == MARK_TEXT:
+                    found.add("text")
+                elif mark == MARK_IMG:
+                    found.add("image")
+                if found == {"text", "image"}:
+                    return found
+    return found
+
+
+def clear_watermark(path: str, kinds: list = None) -> dict:
+    """清除 .docx 中的水印。
+
+    - kinds 为 None：清掉本工具添加的，以及 Word 原生的（衬于文字下方的图形）。
+      既能清掉本工具留下的文本/图像水印，也能清掉原本就带水印的 Word 文档。
+    - kinds 给定（包含 'text' / 'image'）：只删带对应标记的水印，保留其它类型，
+      且**不**动 Word 原生的 behindDoc 图形（避免“只去文字、保留图片”时被误删）。
+      例如 kinds=['text'] 仅去除文字水印、图片水印原样保留。
+    """
+    document = Document(path)
+    kinds = set(kinds or [])
+    only_kinds = bool(kinds)
+    # 把用户传入的 'text'/'image' 映射到本工具的私有标记常量
+    kind_marks = set()
+    if "text" in kinds:
+        kind_marks.add(MARK_TEXT)
+    if "image" in kinds:
+        kind_marks.add(MARK_IMG)
     removed = 0
     processed_parts = set()
     for section in document.sections:
@@ -621,9 +655,16 @@ def clear_watermark(path: str) -> dict:
             if part.part in processed_parts:
                 continue
             processed_parts.add(part.part)
-            removed += _remove_in_part(part, clear_any=True)  # 清掉所有水印类图形
+            if only_kinds:
+                # 仅按类型删除：只删 mark 命中 kinds 的图形，绝不碰原生水印
+                for drawing in list(part._element.iter(qn("w:drawing"))):
+                    if _mark_of(drawing) in kind_marks:
+                        _detach_drawing(drawing)
+                        removed += 1
+            else:
+                removed += _remove_in_part(part, clear_any=True)  # 清掉所有水印类图形
     document.save(path)
-    return {"ok": True, "engine": "docx", "removed": removed}
+    return {"ok": True, "engine": "docx", "removed": removed, "kinds": sorted(kinds)}
 
 
 def has_watermark(path: str) -> bool:

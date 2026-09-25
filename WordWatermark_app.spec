@@ -10,16 +10,23 @@ onedir 形态没有这一步，关闭即退出（实测 0.2 秒）。
 WordWatermark.exe 启动器，用户拿到的仍然只有一个 exe。
 """
 from exclude_conf import EXCLUDES
+import imageio_ffmpeg as _iff
+
+# imageio_ffmpeg 自带的 ffmpeg 静态二进制（约 70MB）必须显式打进包，
+# 否则打包后视频水印功能找不到解码器。放到 imageio_ffmpeg/binaries 下，
+# 使其相对路径与运行时 get_ffmpeg_exe() 的预期一致。
+_ff_bin = _iff.get_ffmpeg_exe()
 
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[(_ff_bin, 'imageio_ffmpeg/binaries')],
     # office_tweak 在 gui.py 里是「try 导入（模块缺失不该拖垮 UI）」，
     # PyInstaller 的静态分析扫不到，必须显式声明，否则「Word 秒退」按钮点了没反应。
-    hiddenimports=['watermark_tool.office_tweak'],
+    # video 同理（视频水印模块，依赖 imageio / imageio_ffmpeg / numpy）。
+    hiddenimports=['watermark_tool.office_tweak', 'watermark_tool.video'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
