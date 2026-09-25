@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QSystemTrayIcon, QMenu, QStyle, QProgressBar,
     QButtonGroup, QRadioButton, QSizePolicy,
 )
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QStringListModel, QEvent, QRect, QPointF
+from PySide6.QtCore import Qt, QObject, QThread, Signal, QTimer, QStringListModel, QEvent, QRect, QPointF
 from PySide6.QtGui import QColor, QImage, QPixmap, QIntValidator, QPainter, QPen
 
 from . import core, watchdog, preview, word_fonts, engine_docx
@@ -104,6 +104,43 @@ class _ProportionalButton(QPushButton):
         if w <= 0:
             return
         self.setFixedWidth(max(self._minimum, int(w * self._ratio)))
+
+
+class _EqualBottoms(QObject):
+    """让两个控件的【底边】保持同一水平线。
+
+    左右两列自然行数不同（文本水印比图像水印多行），是本版式要压平的最后
+    一处参差：这里把较矮的一列的最小高度抬到两者 sizeHint 的较大值。
+    不能直接改 sizePolicy 去“拉伸”——历史上 Minimum/Preferred 会吸走多余空间、
+    把组标题顶得悬空（v1.3.3 踩过），这里只补最小高度，最稳。
+    """
+
+    def __init__(self, a, b, parent=None):
+        super().__init__(parent if parent is not None else a)
+        self._a, self._b = a, b
+        for w in (a, b):
+            w.installEventFilter(self)
+        QTimer.singleShot(0, self.sync)
+
+    def eventFilter(self, obj, event):
+        if obj in (self._a, self._b) and event.type() in (
+                QEvent.Resize, QEvent.Show, QEvent.LayoutRequest):
+            QTimer.singleShot(0, self.sync)
+        return False
+
+    def sync(self):
+        if self._a is None or self._b is None:
+            return
+        try:
+            ha = self._a.minimumSizeHint().height()
+            hb = self._b.minimumSizeHint().height()
+        except RuntimeError:      # 控件已被销毁
+            return
+        target = max(int(ha), int(hb), 0)
+        # 只在真的变了才写：否则 setMinimumHeight 触发 Resize → 再次 sync，死循环
+        for w in (self._a, self._b):
+            if target > 0 and w.minimumHeight() != target:
+                w.setMinimumHeight(target)
 
 
 # 视频水印锚点：位置名 -> (左上角相对帧的比例, 0..1)
@@ -480,13 +517,22 @@ class App(QMainWindow):
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.setCentralWidget(scroll)
 
+        # ---------------- 左区容器：Word 的输入/输出行也归到这一列 ----------------
+        # 之前这两行是通栏（横跨整窗、含视频列），右缘会伸得很远；
+        # 放进左区后宽度 = 左区宽 = 文本列 + 图像列宽的合计，
+        # 于是「浏览...」按钮的右缘天然与「图像水印」组框右缘竖向对齐。
+        left = QWidget()
+        vl = QVBoxLayout(left)
+        vl.setContentsMargins(0, 0, 0, 0)
+        vl.setSpacing(8)
+
         # 文件
         f_file = QWidget()
         h = QHBoxLayout(f_file); h.setContentsMargins(0, 0, 0, 0)
         self.file_edit = QLineEdit(); self.file_edit.setPlaceholderText("选择 Word 文件 (.docx / .doc)")
         h.addWidget(self.file_edit, 3)
         btn = QPushButton("浏览..."); btn.clicked.connect(self._browse_file); h.addWidget(btn, 1)
-        root.addWidget(f_file)
+        vl.addWidget(f_file)
 
         # 输出文件（不破坏原文件）
         f_out = QWidget()
@@ -496,7 +542,7 @@ class App(QMainWindow):
         ho.addWidget(self.out_edit, 3)
         bout = QPushButton("浏览..."); bout.clicked.connect(self._browse_output); ho.addWidget(bout, 1)
         ho.addStretch(1)
-        root.addWidget(f_out)
+        vl.addWidget(f_out)
         self.out_edit.textChanged.connect(self._on_output_changed)
 
         # ---------------- 文本水印（可启用/禁用） ----------------
@@ -634,10 +680,13 @@ class App(QMainWindow):
                   self.img_offy_slider, self.img_offy_spin):
             self.img_ctrl_widgets.append(w)
         f_img.layout().addLayout(vi)
+        f_img.layout().addStretch(1)   # 底部位留白：盒高被拉到与文本水印一样高时从这里顶出
         # 页面明示支持的图片格式（仿宋红字），让用户知晓
         f_img.layout().addWidget(self._fmt_hint(
             "支持格式：png、jpg、jpeg、webp、pdf（PDF 仅取首页）"))
         f_img.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        # 文本/图像两列【底边平行】：行数少的图像列补到文本列高度。
+        self._col_eq = _EqualBottoms(f_text, f_img)
 
         # Word 主操作按钮：两个按钮「同一行、彼此平行」（同一 Y），
         # 但各自只相对自己列的组框宽度居中，互不相干、也无视视频列。
@@ -744,10 +793,7 @@ class App(QMainWindow):
         vci.addStretch(1)
 
         # ---------------- 左侧 Word 区（竖直堆叠）：两列水印 → 通栏预览 → 主按钮行 ----------------
-        left = QWidget()
-        vl = QVBoxLayout(left)
-        vl.setContentsMargins(0, 0, 0, 0)
-        vl.setSpacing(8)
+        # （left / vl 已在文件输入行之前创建，此处顺序继续往下堆）
 
         h_types = QHBoxLayout()
         h_types.setSpacing(8)
@@ -850,7 +896,17 @@ class App(QMainWindow):
         self.tile_cols_spin.valueChanged.connect(self._on_harden_changed)
 
     def _build_video_section(self):
-        """构建独立的“视频水印”区块：逐帧加文字/图片水印，支持固定位置或滚动播放。"""
+        """构建右侧“视频水印”整列：输入/输出行（在组框上方） + 视频水印组框。
+
+        源视频与输出行原先嵌在组框内部，要进框里才能看到；提到组框上方后，
+        与左侧 Word 区的“Word 文件/输出”两行处在同一水平线，左右对称更好找。
+        """
+        # 整列容器：0 边距，让两行的左右缘严格等于组框边缘
+        wrap = QWidget()
+        vcol = QVBoxLayout(wrap)
+        vcol.setContentsMargins(0, 0, 0, 0)
+        vcol.setSpacing(8)
+
         g = self._make_group("视频水印（与 Word 水印独立）")
         v = g.layout()
         v.setSpacing(6)
@@ -860,20 +916,30 @@ class App(QMainWindow):
 
         if video_mod is None:
             v.addWidget(QLabel("⚠ 视频依赖 imageio / imageio-ffmpeg 未安装，视频功能不可用。"))
-            return g
+            vcol.addWidget(g)
+            return wrap
 
-        # 源视频 / 输出
-        h1 = QHBoxLayout()
+        # 源视频 / 输出 —— 放在组框【上方】，宽度与组框一致
+        f_vsrc = QWidget()
+        h1 = QHBoxLayout(f_vsrc); h1.setContentsMargins(0, 0, 0, 0)
         self.v_src_edit = QLineEdit(); self.v_src_edit.setPlaceholderText("选择视频文件（mp4 / mkv / avi / mov / wmv …）")
         h1.addWidget(self.v_src_edit, 3)
-        b1 = QPushButton("浏览..."); b1.clicked.connect(self._v_browse_src); h1.addWidget(b1, 1)
-        v.addLayout(h1)
-        h2 = QHBoxLayout()
+        b1 = QPushButton("浏览..."); b1.clicked.connect(self._v_browse_src);         h1.addWidget(b1, 1)
+        # Maximum：高度只跟两个控件走，不去吃掉这一列多出来的竖直空间
+        f_vsrc.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        vcol.addWidget(f_vsrc, 0, Qt.AlignTop)
+        f_vout = QWidget()
+        h2 = QHBoxLayout(f_vout); h2.setContentsMargins(0, 0, 0, 0)
         h2.addWidget(QLabel("输出:"))
         self.v_out_edit = QLineEdit(); self.v_out_edit.setPlaceholderText("默认 <原名>WaterMark.mp4，可修改")
         h2.addWidget(self.v_out_edit, 3)
-        b2 = QPushButton("浏览..."); b2.clicked.connect(self._v_browse_out); h2.addWidget(b2, 1)
-        v.addLayout(h2)
+        b2 = QPushButton("浏览..."); b2.clicked.connect(self._v_browse_out);         h2.addWidget(b2, 1)
+        f_vout.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        vcol.addWidget(f_vout, 0, Qt.AlignTop)
+        vcol.addWidget(g, 0, Qt.AlignTop)
+        # 收口：把两行以下多余的竖直空间交给末尾弹性留白，
+        # 否则Qt会把多余高度平摊给列内每个控件，输入/输出行会被拉成上百像素高。
+        vcol.addStretch(1)
 
         # 水印类型 + 各自的播放方式（可自由搭配）
         ht = QHBoxLayout()
@@ -1124,7 +1190,7 @@ class App(QMainWindow):
             "图片水印采用超采样渲染，放大导出时依然锐利。逐帧处理较长视频较慢属正常，原音轨会自动保留。")
         self.v_status_lbl.setWordWrap(True)
         v.addWidget(self.v_status_lbl)
-        return g
+        return wrap
 
     def _v_make_xy_spin(self, value):
         """X/Y 百分比输入（0~100，1% 一档），用于精确自定义水印落点。"""

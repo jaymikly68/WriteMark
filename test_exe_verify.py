@@ -131,11 +131,16 @@ def main():
         has_tray = ("QSystemTrayIcon" in names and "_setup_tray" in names
                     and "_quit_app" in names and "_show_from_tray" in names
                     and "_stop_watch_from_tray" in names)
+        # v1.4.2 版式：两列底边平行（_EqualBottoms/_col_eq）+ 视频输入输出行上移
+        has_layout42 = ("_EqualBottoms" in names and "_col_eq" in names
+                        and "v_src_edit" in names and "v_out_edit" in names
+                        and "file_edit" in names and "out_edit" in names)
         print(f"watermark_tool.gui: 含字体相关 _maybe_load_word_fonts/_apply_word_fonts/FontWorker"
               f" + 可编辑下拉框(Editable/Completer/CompletionMode/FilterMode/Model) -> {has_new}; "
               f"中西文字体双下拉框 -> {has_split_ui}; "
-              f"防去除加固(平铺/冗余) -> {has_harden}; 系统托盘常驻 -> {has_tray}")
-        if not has_new or not has_split_ui or not has_harden or not has_tray:
+              f"防去除加固(平铺/冗余) -> {has_harden}; 系统托盘常驻 -> {has_tray}; "
+              f"v1.4.2 版式(两列等高/视频行上移) -> {has_layout42}")
+        if not has_new or not has_split_ui or not has_harden or not has_tray or not has_layout42:
             ok = False
 
     if docx is None:
