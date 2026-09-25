@@ -98,6 +98,34 @@ def _tk_window(title: str, text: str):
 STAMP_NAME = "payload.stamp"
 
 
+def _swap_into_place(tmp: str, dst: str):
+    """把解压好的 tmp 目录原子改名为 dst。
+
+    踩过的坑：用户旧实例还在运行时占用了 dst 目录（exe/dll 被锁），
+    os.replace 直接 WinError 5「拒绝访问」，用户只看到一个莫名其妙的报错。
+    所以这里重试一段时间，仍失败就给出「请先退出正在运行的程序」的明确指引。
+    """
+    import time
+    last_err = None
+    for _ in range(10):
+        if os.path.isdir(dst):
+            shutil.rmtree(dst, ignore_errors=True)
+        if not os.path.isdir(dst):
+            try:
+                os.replace(tmp, dst)
+                return
+            except OSError as e:
+                last_err = e
+        else:
+            last_err = OSError(5, "拒绝访问（旧运行环境被占用）")
+        time.sleep(0.6)
+    raise RuntimeError(
+        "无法更新运行环境：旧版本的程序可能还在运行，占用了文件。\n"
+        "请先完全退出「一键水印工具」（包括任务栏托盘图标），再重新打开。\n\n"
+        f"技术细节：{last_err}"
+    )
+
+
 def payload_fingerprint() -> str:
     """当前 payload 的指纹（大小 + 修改时间）。
 
@@ -139,7 +167,11 @@ def ensure_app(update) -> str:
         with open(os.path.join(tmp, STAMP_NAME), "w", encoding="utf-8") as f:
             f.write(payload_fingerprint())
         update("解压完成，正在启动…")
-        os.replace(tmp, dst)
+        try:
+            _swap_into_place(tmp, dst)
+        except Exception:
+            shutil.rmtree(tmp, ignore_errors=True)  # 失败时清掉残留的 .tmp
+            raise
         if not os.path.isfile(os.path.join(dst, APP_EXE_NAME)):
             raise RuntimeError(f"解压后找不到主程序：{os.path.join(dst, APP_EXE_NAME)}\n"
                                f"请删除 {dst} 后重试。")
