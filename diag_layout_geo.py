@@ -1,12 +1,12 @@
-"""几何校验（v1.4.3 版式）：
+"""几何校验（v1.4.4 版式）：
 
     左侧 Word 区（竖排）                  右侧视频列
     [Word 文件 ………… 浏览]                [源视频 ………… 浏览]
     [输出   ………… 浏览]                  [输出   ………… 浏览]
     [文本水印] [图像水印]                [视频水印（独立）]
     [Word 秒退] [防去除加固]  ← 并排成一条水平带：顶边同线、底边同线
-    [水印预览  通栏跨两列       ]
-    [一键插入水印] [一键清除水印]
+    [水印预览  通栏跨两列       ]        └ 底边与左侧预览框齐平
+    [一键插入水印] [一键清除水印]         （框内多余高度全给「视频水印预览」的帧）
 
 校验点：
   1) Word 输入/输出行的「浏览」按钮右缘与「图像水印」组框右缘竖向对齐（两行已缩短）；
@@ -16,10 +16,16 @@
   4) 防去除加固 顶边紧接 图像水印 底边，且 左缘/宽度 与图像水印一致；
   5) 水印预览 在两块下方，左缘对齐文本水印、右缘对齐图像水印（通栏两列）；
   6) 按钮行在预览下方，且分别相对 文本/图像 列居中、同一水平线；
-  7) 视频的源/输出行在「视频水印」组框【上方】，且右缘与组框一致（列宽不变）。
+  7) 视频的源/输出行在「视频水印」组框【上方】，且右缘与组框一致（列宽不变）；
+  8) 视频水印框【底边】与左侧「水印预览」框【底边】平行，多出来的空间落在
+     「视频水印预览」的帧上；进度条已移出视频框（挂底部状态行、闲置隐藏）。
+用法：
+    python diag_layout_geo.py                  # 默认 offscreen（快、免打扰）
+    WM_GEO_REAL=1 python diag_layout_geo.py    # 真实平台（字号/控件高度与实机一致）
 """
 import os
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+if not os.environ.get("WM_GEO_REAL"):
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication, QLabel
 
@@ -148,9 +154,34 @@ if v is not None and t is not None:
     left_right = max(x[0] + x[2] for x in (t, i, h, p, ex) if x)
     check(v[0] >= left_right - 4,
           f"视频水印应为独立右列（左侧区右缘 {left_right}，视频列左缘 {v[0]}）")
-    d_top = abs(v[1] - t[1])
-    check(d_top <= 60,
-          f"视频框顶应与 Word 两列大致同一水平线（视频框顶 {v[1]}，文本列顶 {t[1]}，差 {d_top}）")
+    # 视频两行与左侧「Word 文件」行同一水平线（组框顶边比左列低是正常的：
+    # 它上面还有两行输入）
+    if vfi is not None and fi is not None:
+        check(abs(vfi[1] - fi[1]) <= 6,
+              f"视频输入行应与 Word 输入行同一水平线（{vfi[1]} vs {fi[1]}）")
+
+if v is not None and p is not None:
+    # 8) 视频水印框【底边】与「水印预览」框【底边】平行，
+    #    且多出来的空间落在「视频水印预览」的帧上（帧明显高于最小高 203）
+    check(abs((v[1] + v[3]) - (p[1] + p[3])) <= 4,
+          f"视频水印框底边应与水印预览框底边平行（{v[1] + v[3]} vs {p[1] + p[3]}）")
+    fl = w.v_frame_label
+    ftl = fl.mapTo(w, fl.rect().topLeft())
+    check(fl.height() > 240,
+          f"视频预览帧应吃掉多余空间（帧高 {fl.height()} > 240，最小高 203）")
+    check(ftl.y() + fl.height() < v[1] + v[3] - 100,
+          f"预览帧底边应在视频框内、上方还留着按钮与说明（帧底 {ftl.y() + fl.height()}，"
+          f"框底 {v[1] + v[3]}）")
+
+# 9) 进度条已移出视频框（挂在窗口底部状态行，闲置时隐藏）
+if v is not None:
+    pr = w.v_progress
+    ptl = pr.mapTo(w, pr.rect().topLeft())
+    check(not (v[0] <= ptl.x() <= v[0] + v[2] and v[1] <= ptl.y() <= v[1] + v[3]),
+          f"进度条不应再位于视频框内（进度条 {ptl.x()},{ptl.y()}；"
+          f"框 {v[0]},{v[1]} {v[2]}×{v[3]}）")
+    check(not pr.isVisible(),
+          "进度条闲置时应隐藏（不再是一条常驻空白框）")
 
 print("\nRESULT:", "ALL OK" if ok else "HAS FAILURES")
 raise SystemExit(0 if ok else 1)

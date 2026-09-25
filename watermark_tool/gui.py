@@ -143,6 +143,44 @@ class _EqualBottoms(QObject):
                 w.setMinimumHeight(target)
 
 
+class _MatchBottom(QObject):
+    """让 follower 的【底边】落在 anchor 的底边上（取同一窗口坐标系比较）。
+
+    右侧视频整列与左侧「水印预览」框分属两列、行高天然不等（左列下方还有按钮行），
+    要让视频框底边与预览框底边齐平，最稳的是直接给视频整列定高：
+        视频列高 = 「水印预览」框底边在窗口里的 y − 视频列顶边在窗口里的 y
+    只在高度真的变化时才写（否则 setFixedHeight → Resize → 再 sync 会来回抖）。
+    """
+
+    def __init__(self, anchor, follower, parent=None):
+        super().__init__(parent if parent is not None else follower)
+        self._anchor, self._fol = anchor, follower
+        for w in (anchor, follower):
+            w.installEventFilter(self)
+        QTimer.singleShot(0, self.sync)
+
+    def eventFilter(self, obj, event):
+        if obj in (self._anchor, self._fol) and event.type() in (
+                QEvent.Resize, QEvent.Show, QEvent.LayoutRequest):
+            QTimer.singleShot(0, self.sync)
+        return False
+
+    def sync(self):
+        if self._anchor is None or self._fol is None:
+            return
+        try:
+            a, f = self._anchor, self._fol
+            win = f.window()
+            bottom = a.mapTo(win, a.rect().bottomLeft()).y() + 1      # 底边（含）
+            top = f.mapTo(win, f.rect().topLeft()).y()
+        except RuntimeError:            # 控件已被销毁
+            return
+        h = int(bottom - top)
+        if h <= 0 or f.height() == h:
+            return
+        f.setFixedHeight(h)
+
+
 # 视频水印锚点：位置名 -> (左上角相对帧的比例, 0..1)
 # 文字与图片各有独立一份，二者可错开，避免同时固定时完全重叠。
 # "自定义" 由右侧 X/Y 百分比输入决定（拖拽预览帧亦会写入 X/Y）。
@@ -875,8 +913,13 @@ class App(QMainWindow):
         h_main = QHBoxLayout()
         h_main.setSpacing(8)
         h_main.addWidget(left, 0, Qt.AlignTop)
-        h_main.addWidget(f_video, 1)
+        # 顶对齐必须有：视频整列被 _MatchBottom 定了高（小于左侧列高），
+        # 不给 AlignTop 的话 Qt 会把它在这一行里垂直居中 → 输入行整体下移、与左列错位。
+        h_main.addWidget(f_video, 1, Qt.AlignTop)
         root.addLayout(h_main)
+
+        # 视频框底边 = 左侧「水印预览」框底边（同一水平线）
+        self._v_bottom_eq = _MatchBottom(f_prev, f_video)
 
         # 守护
         f_watch = self._make_group("后台守护（水印被删自动补回）")
@@ -902,7 +945,17 @@ class App(QMainWindow):
         self.log_text = QTextEdit(); self.log_text.setReadOnly(True); vlog.addWidget(self.log_text)
         root.addWidget(f_log, 1)
 
-        self.status_label = QLabel("就绪"); root.addWidget(self.status_label)
+        # 底部状态行：左侧状态文字，右侧视频进度条。
+        # 进度条默认隐藏（闲置时不留空白框），只在「开始加水印」处理期间出现。
+        h_foot = QHBoxLayout()
+        h_foot.setSpacing(8)
+        self.status_label = QLabel("就绪")
+        h_foot.addWidget(self.status_label, 1)
+        self.v_progress = QProgressBar()
+        self.v_progress.setFixedWidth(260)
+        self.v_progress.setVisible(False)
+        h_foot.addWidget(self.v_progress)
+        root.addLayout(h_foot)
 
         # 启动即渲染一次默认预览
         self._render_preview()
@@ -965,10 +1018,11 @@ class App(QMainWindow):
         b2 = QPushButton("浏览..."); b2.clicked.connect(self._v_browse_out);         h2.addWidget(b2, 1)
         f_vout.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         vcol.addWidget(f_vout, 0, Qt.AlignTop)
-        vcol.addWidget(g, 0, Qt.AlignTop)
-        # 收口：把两行以下多余的竖直空间交给末尾弹性留白，
-        # 否则Qt会把多余高度平摊给列内每个控件，输入/输出行会被拉成上百像素高。
-        vcol.addStretch(1)
+        # 组框吃掉列内剩余高度：视频框底边要与左侧「水印预览」框底边齐平，
+        # 高度由 _MatchBottom 统一给定（多余高度再往下传给「视频水印预览」的帧）。
+        # 注意：这里不能再 addStretch(1) 收口——那会让组框缩回自然高度、底部对不上。
+        g.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        vcol.addWidget(g, 1)
 
         # 水印类型 + 各自的播放方式（可自由搭配）
         ht = QHBoxLayout()
@@ -1141,7 +1195,7 @@ class App(QMainWindow):
         self.v_frame_label.setStyleSheet("border:1px solid #bbb; background:#222;")
         self.v_frame_label.setText("点“预览水印效果”即可查看（未选视频时用示意画面）")
         self.v_frame_label.dragged.connect(self._on_video_frame_drag)
-        vpv.addWidget(self.v_frame_label)
+        vpv.addWidget(self.v_frame_label, 1)
         # 拖拽自定义位置开关：开启后可在帧上拖动定位，落点写回 X/Y 并切到「自定义」
         self.v_drag_chk = QCheckBox("拖拽自定义位置（在预览帧上拖动水印）")
         self.v_drag_chk.setToolTip("勾选后可在预览帧上用鼠标把水印拖到任意位置；"
@@ -1174,7 +1228,10 @@ class App(QMainWindow):
         self.v_play_btn.clicked.connect(self._v_play_preview)
         hvprev.addWidget(self.v_play_btn)
         vpv.addLayout(hvprev)
-        v.addWidget(f_vprev)
+        # 组框里的多余高度整块给「视频水印预览」（组框要一直撑到与左侧水印预览框齐平，
+        # 上面几行参数不能再被平摊拉高——那样控件会带着大片空白，很难看）
+        f_vprev.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        v.addWidget(f_vprev, 1)
 
         # ---------------- 参数改动 → 预览即时重绘（防抖 250ms） ----------------
         # 只在「已经抓到画面」时重绘：不会偷偷去读视频，但改文字/透明度/位置等
@@ -1196,7 +1253,7 @@ class App(QMainWindow):
         self.v_text_chk.stateChanged.connect(self._v_schedule_frame)
         self.v_img_chk.stateChanged.connect(self._v_schedule_frame)
 
-        # 运行按钮 + 进度 + 取消
+        # 运行按钮（进度条已移到窗口底部状态行，见 _build_ui 末尾）
         hr = QHBoxLayout()
         self.v_run_btn = QPushButton("开始加水印"); self.v_run_btn.clicked.connect(self._v_run)
         self.v_run_btn.setStyleSheet(BTN_HL)          # 与主操作一致：蓝底黑字高亮
@@ -1206,9 +1263,15 @@ class App(QMainWindow):
         self.v_cancel_btn.setEnabled(False)
         self.v_cancel_btn.clicked.connect(self._v_cancel)
         hr.addWidget(self.v_run_btn); hr.addWidget(self.v_cancel_btn)
-        v.addLayout(hr)
-        self.v_progress = QProgressBar()
-        v.addWidget(self.v_progress)
+        # 用 Maximum 高度的容器包住：按钮行只占自然高，不参与「多余高度」的分配，
+        # 否则 QVBoxLayout 会把空余空间也分给这一行，按钮之间出现大片空白。
+        f_runrow = QWidget()
+        f_runrow.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        f_runrow.setLayout(hr)
+        hr.setContentsMargins(0, 0, 0, 0)
+        v.addWidget(f_runrow)
+        # 进度条不放这里：闲置时它就是夹在按钮与说明之间的一条空白框（用户点名删除）。
+        # 改挂到窗口底部的状态行（见 _build_ui 末尾），只在处理过程中才出现。
         self.v_status_lbl = QLabel(
             "播放方式可选「固定 / 滚动 / 固定+滚动」；文字水印与图片水印还能各自单独指定，"
             "因此可以做出「文字滚动 + 图片固定」等任意搭配。"
@@ -1218,6 +1281,9 @@ class App(QMainWindow):
             "（帧率越高文件越大、处理越慢）。"
             "图片水印采用超采样渲染，放大导出时依然锐利。逐帧处理较长视频较慢属正常，原音轨会自动保留。")
         self.v_status_lbl.setWordWrap(True)
+        # 同上：说明文字只占自然高（换行文本的 sizeHint 会把高度算偏大，
+        # 让它在布局里抢空间会把预览帧挤小）
+        self.v_status_lbl.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         v.addWidget(self.v_status_lbl)
         return wrap
 
@@ -1608,6 +1674,7 @@ class App(QMainWindow):
             import traceback
             self.v_run_btn.setEnabled(True)
             self.v_cancel_btn.setEnabled(False)
+            self.v_progress.setVisible(False)
             self.v_status_lbl.setText("失败：" + str(e))
             QMessageBox.critical(self, "失败", f"视频水印处理失败：\n{e}")
             try:
@@ -1658,6 +1725,7 @@ class App(QMainWindow):
         self.v_run_btn.setEnabled(False)
         self.v_cancel_btn.setEnabled(True)
         self.v_progress.setValue(0)
+        self.v_progress.setVisible(True)      # 只在处理期间出现（挂在底部状态行）
         w = VideoWorker(src, out, opts)
         self._v_worker = w
         w.result_signal.connect(self._v_on_result)
@@ -1683,6 +1751,7 @@ class App(QMainWindow):
         self._v_worker = None
         self.v_run_btn.setEnabled(True)
         self.v_cancel_btn.setEnabled(False)
+        self.v_progress.setVisible(False)     # 收工即收起，不留空白进度条
 
     def _v_cancel(self):
         if getattr(self, "_v_worker", None) and self._v_worker.isRunning():
