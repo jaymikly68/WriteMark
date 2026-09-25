@@ -40,7 +40,8 @@ a = Analysis(
     # office_tweak 在 gui.py 里是「try 导入（模块缺失不该拖垮 UI）」，
     # PyInstaller 的静态分析扫不到，必须显式声明，否则「Word 秒退」按钮点了没反应。
     # video 同理（视频水印模块，依赖 imageio / imageio_ffmpeg / numpy）。
-    hiddenimports=['watermark_tool.office_tweak', 'watermark_tool.video'] + _hidden_extra,
+    hiddenimports=['watermark_tool.office_tweak', 'watermark_tool.video',
+                   'watermark_tool.i18n'] + _hidden_extra,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

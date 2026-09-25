@@ -26,10 +26,12 @@ from PySide6.QtWidgets import (
     QScrollArea, QSystemTrayIcon, QMenu, QStyle, QProgressBar,
     QButtonGroup, QRadioButton, QSizePolicy,
 )
-from PySide6.QtCore import Qt, QObject, QThread, Signal, QTimer, QStringListModel, QEvent, QRect, QPointF
-from PySide6.QtGui import QColor, QImage, QPixmap, QIntValidator, QPainter, QPen
+from PySide6.QtCore import (Qt, QObject, QThread, Signal, QTimer, QStringListModel,
+                            QEvent, QRect, QPointF, QSettings, QLocale)
+from PySide6.QtGui import (QColor, QImage, QPixmap, QIntValidator, QPainter, QPen,
+                           QFont)
 
-from . import core, watchdog, preview, word_fonts, engine_docx
+from . import core, watchdog, preview, word_fonts, engine_docx, i18n
 try:  # office_tweak 只依赖标准库，任何情况下缺了也不该拖垮整GUI
     from . import office_tweak as otw
 except Exception:  # pragma: no cover
@@ -144,24 +146,28 @@ class _EqualBottoms(QObject):
 
 
 class _MatchBottom(QObject):
-    """让 follower 的【底边】落在 anchor 的底边上（取同一窗口坐标系比较）。
+    """让 follower 内「视频框」的底边落在 anchor 的底边上（取同一窗口坐标系比较）。
 
     右侧视频整列与左侧「水印预览」框分属两列、行高天然不等（左列下方还有按钮行），
     要让视频框底边与预览框底边齐平，最稳的是直接给视频整列定高：
         视频列高 = 「水印预览」框底边在窗口里的 y − 视频列顶边在窗口里的 y
+                   + 排在视频框【下方】的尾部控件总高（含间距）
+    尾部控件（如移过来的「后台守护」框）在视频列内是定高的，不会跟着拉伸。
     只在高度真的变化时才写（否则 setFixedHeight → Resize → 再 sync 会来回抖）。
     """
 
-    def __init__(self, anchor, follower, parent=None):
+    def __init__(self, anchor, follower, tail=(), spacing=8, parent=None):
         super().__init__(parent if parent is not None else follower)
         self._anchor, self._fol = anchor, follower
-        for w in (anchor, follower):
+        self._tail = [t for t in tail if t is not None]
+        self._spacing = spacing
+        for w in [anchor, follower] + self._tail:
             w.installEventFilter(self)
         QTimer.singleShot(0, self.sync)
 
     def eventFilter(self, obj, event):
-        if obj in (self._anchor, self._fol) and event.type() in (
-                QEvent.Resize, QEvent.Show, QEvent.LayoutRequest):
+        if (obj in [self._anchor, self._fol] + self._tail
+                and event.type() in (QEvent.Resize, QEvent.Show, QEvent.LayoutRequest)):
             QTimer.singleShot(0, self.sync)
         return False
 
@@ -173,9 +179,10 @@ class _MatchBottom(QObject):
             win = f.window()
             bottom = a.mapTo(win, a.rect().bottomLeft()).y() + 1      # 底边（含）
             top = f.mapTo(win, f.rect().topLeft()).y()
+            tail_h = sum(int(t.height()) for t in self._tail) + self._spacing * len(self._tail)
         except RuntimeError:            # 控件已被销毁
             return
-        h = int(bottom - top)
+        h = int(bottom - top) + tail_h
         if h <= 0 or f.height() == h:
             return
         f.setFixedHeight(h)
@@ -212,9 +219,21 @@ _V_MOTION_LABELS = ["跟随", "固定", "滚动", "固定+滚动"]
 _V_MOTION_INVERSE = {v: k for k, v in _V_MOTION_MAP.items()}
 
 
+def _combo_key(combo) -> str:
+    """取下拉框当前项的【规范 key】（itemData 里存的中文原文）。
+
+    语言切换只改显示文字（setItemText），不改 itemData，所以业务逻辑一律走这里；
+    若用 currentText()，一旦把界面切成英文/日文，位置/播放方式/画质就会全部失灵。
+    """
+    d = combo.currentData()
+    if isinstance(d, str) and d:
+        return d
+    return combo.currentText()
+
+
 def _resolve_motion(combo, global_motion: str) -> str:
     """类型级播放方式：选了就用选的，选“跟随”就用全局单选的值。"""
-    label = combo.currentText()
+    label = _combo_key(combo)
     if label == "跟随":
         return global_motion
     return _V_MOTION_MAP.get(label, global_motion)
@@ -518,6 +537,11 @@ class App(QMainWindow):
         self._tray_tried = 0         # 托盘初始化尝试次数
         self._tray_reason = ""       # 托盘初始化失败原因
 
+        # 多语言界面（Polyglot UI）：恢复上次选择的语言；首次启动按系统 locale 取最接近的
+        self._lang = self._load_saved_lang()
+        _app = QApplication.instance()
+        self._base_ui_font = QFont(_app.font()) if _app else QFont()  # 切语言时在它基础上换字体族
+
         self.log_signal.connect(self._append_log)
         self.status_signal.connect(self._set_status)
 
@@ -530,7 +554,8 @@ class App(QMainWindow):
         self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
 
     def _set_status(self, msg):
-        self.status_label.setText(msg)
+        self._status_key = msg                 # 记住中文原文，切语言时按它重刷
+        self.status_label.setText(i18n.tr(msg))
 
     def thread_log(self, msg, verbose=False):
         """供后台线程（守护）调用，切回主线程更新 UI。"""
@@ -554,6 +579,28 @@ class App(QMainWindow):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.setCentralWidget(scroll)
+
+        # ---------------- 多语言界面（Polyglot UI）----------------
+        # 界面上的汉字可整块换成 8 种语言（含繁体），并按语言自动套用对应字体。
+        # 只改「显示文字」：水印内容、文件名、导出结果都不受影响；
+        # 值类下拉框的规范值存在 itemData 里，因此换语言不会动到功能。
+        f_lang = QWidget()
+        h_lang = QHBoxLayout(f_lang)
+        h_lang.setContentsMargins(0, 0, 0, 0)
+        h_lang.setSpacing(6)
+        self.lang_lbl = QLabel("界面语言:")
+        h_lang.addWidget(self.lang_lbl)
+        self.lang_combo = QComboBox()
+        self.lang_combo.addItems([name for _code, name in i18n.LANGS])   # 始终用各语言原名
+        self.lang_combo.setFixedWidth(140)
+        self.lang_combo.setCurrentIndex(max(0, self._lang_index(self._lang)))
+        self.lang_combo.currentIndexChanged.connect(self._on_lang_changed)
+        h_lang.addWidget(self.lang_combo)
+        self.lang_hint = QLabel("Polyglot UI · 多语言界面（切换后界面文字与字体一起变，水印内容不受影响）")
+        self.lang_hint.setStyleSheet(
+            "color:#e10600; font-family:'FangSong','仿宋'; font-size:11px;")
+        h_lang.addWidget(self.lang_hint, 1)
+        root.addWidget(f_lang)
 
         # ---------------- 左区容器：Word 的输入/输出行也归到这一列 ----------------
         # 之前这两行是通栏（横跨整窗、含视频列），右缘会伸得很远；
@@ -918,10 +965,8 @@ class App(QMainWindow):
         h_main.addWidget(f_video, 1, Qt.AlignTop)
         root.addLayout(h_main)
 
-        # 视频框底边 = 左侧「水印预览」框底边（同一水平线）
-        self._v_bottom_eq = _MatchBottom(f_prev, f_video)
-
-        # 守护
+        # 守护：放在**右侧视频列**、「视频水印」框正下方（同宽），
+        # 原来挂在页面左下方，右侧那块空白就浪费了。
         f_watch = self._make_group("后台守护（水印被删自动补回）")
         vw = f_watch.layout()
         self.watch_chk = QCheckBox("启用守护（水印被删自动补回）")
@@ -931,7 +976,12 @@ class App(QMainWindow):
         self.interval_spin.setDecimals(2); self.interval_spin.setSingleStep(0.2); self.interval_spin.setValue(1.0)
         row.addWidget(self.interval_spin)
         vw.addLayout(row)
-        root.addWidget(f_watch)
+        f_watch.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        f_video.layout().addWidget(f_watch, 0, Qt.AlignTop)
+
+        # 视频框底边 = 左侧「水印预览」框底边（同一水平线）；tail 里的控件排在视频框
+        # 下方，定高时要额外把它们的高度算进去（否则会把视频框压扁）。
+        self._v_bottom_eq = _MatchBottom(f_prev, f_video, tail=[f_watch])
 
         # 日志（含「Word 秒退」的诊断 / 修复 / 测速输出框）
         f_log = self._make_group("日志")
@@ -960,6 +1010,12 @@ class App(QMainWindow):
         # 启动即渲染一次默认预览
         self._render_preview()
 
+        # 多语言界面：绑定下拉框规范 key → 记下所有静态中文原文 → 应用启动时保存的语言
+        self._bind_combo_keys()
+        self._i18n_scan()
+        if self._lang != i18n.DEFAULT_LANG:
+            self._retranslate(self._lang)
+
         # 实时预览：任一参数变化后 200ms 自动刷新（防抖，避免拖动滑块时频繁渲染）
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
@@ -976,6 +1032,162 @@ class App(QMainWindow):
         self.tile_chk.stateChanged.connect(self._on_harden_changed)
         self.tile_rows_spin.valueChanged.connect(self._on_harden_changed)
         self.tile_cols_spin.valueChanged.connect(self._on_harden_changed)
+
+    # ------------------------------------------------ 多语言界面（Polyglot UI）
+    @staticmethod
+    def _has_cjk(s: str) -> bool:
+        return any('\u4e00' <= c <= '\u9fff' for c in (s or ""))
+
+    def _load_saved_lang(self) -> str:
+        """上次用的语言（QSettings）；首次启动按系统 locale 选最接近的一种。"""
+        codes = [c for c, _n in i18n.LANGS]
+        try:
+            saved = QSettings("WordWatermark", "WordWatermark").value("ui_lang", "")
+            if saved in codes:
+                return saved
+        except Exception:
+            pass
+        try:
+            name = QLocale.system().name()            # 形如 zh_CN / ja_JP
+            if name.startswith("zh"):
+                if name.split("_")[-1].upper() in ("TW", "HK", "MO") or name.lower() == "zh_tw":
+                    return "zh-TW"
+                return "zh-CN"
+            for c in ("ja", "ko", "ru", "de", "fr"):
+                if name.lower().startswith(c):
+                    return c
+            if name.lower().startswith("en"):
+                return "en"
+        except Exception:
+            pass
+        return i18n.DEFAULT_LANG
+
+    def _persist_lang(self):
+        try:
+            QSettings("WordWatermark", "WordWatermark").setValue("ui_lang", i18n.lang())
+        except Exception:
+            pass
+
+    def _lang_index(self, code: str) -> int:
+        for i, (c, _n) in enumerate(i18n.LANGS):
+            if c == code:
+                return i
+        return 0
+
+    def _on_lang_changed(self, idx: int):
+        if idx < 0 or idx >= len(i18n.LANGS):
+            return
+        code = i18n.LANGS[idx][0]
+        if code != getattr(self, "_lang", i18n.DEFAULT_LANG):
+            self._retranslate(code)
+
+    def _bind_combo_keys(self):
+        """给「值参与逻辑」的下拉框每项写入 itemData＝中文规范 key。
+
+        语言切换只改显示文字（setItemText），itemData 不动，
+        业务逻辑一律经 `_combo_key()` 取中文 key，功能不受界面语言影响。
+        """
+        self._key_combos = [w for w in (
+            getattr(self, n, None) for n in (
+                "text_pos_combo", "img_pos_combo",
+                "v_text_motion_combo", "v_img_motion_combo",
+                "v_text_pos_combo", "v_img_pos_combo", "v_crf_combo",
+            )) if w is not None]
+        for cb in self._key_combos:
+            for i in range(cb.count()):
+                d = cb.itemData(i)
+                if not (isinstance(d, str) and d):
+                    cb.setItemData(i, cb.itemText(i))
+
+    def _i18n_scan(self):
+        """启动时把全部静态中文原文登记下来（key＝中文原文），供切换语言时重设。
+
+        动态文字（状态行、颜色按钮、位置摘要等运行期会变）单独走刷新方法，
+        不进静态表——它们的文本随时会被业务代码重写。
+        """
+        self._i18n_static = []                    # (widget, kind, key)
+        dyn = set()
+        for name in ("status_label", "_exit_info", "v_status_lbl",
+                     "color_btn", "v_color_btn", "v_pos_lbl"):
+            w = getattr(self, name, None)
+            if w is not None:
+                dyn.add(id(w))
+        for w in self.centralWidget().findChildren(QWidget):
+            if id(w) in dyn:
+                continue
+            try:
+                tip = w.toolTip()
+                if self._has_cjk(tip):
+                    self._i18n_static.append((w, "tooltip", tip))
+            except Exception:
+                pass
+            if isinstance(w, (QPushButton, QCheckBox, QRadioButton, QLabel)):
+                t = w.text()
+                if self._has_cjk(t):
+                    self._i18n_static.append((w, "text", t))
+            elif isinstance(w, (QLineEdit, QTextEdit)):
+                try:
+                    p = w.placeholderText()
+                    if self._has_cjk(p):
+                        self._i18n_static.append((w, "placeholder", p))
+                except Exception:               # 旧 Qt 的 QTextEdit 无 placeholder
+                    pass
+
+    def _refresh_color_btns(self):
+        if getattr(self, "color_btn", None) is not None:
+            self.color_btn.setText(i18n.trf(
+                "文本颜色: RGB({rgb})",
+                rgb=", ".join(str(c) for c in self.color)))
+        if getattr(self, "v_color_btn", None) is not None:
+            self.v_color_btn.setText(
+                i18n.trf("颜色: {name}", name=f"RGB{self.v_color}"))
+
+    def _apply_ui_font(self):
+        """按当前语言给整个界面套字体族（字号沿用启动时的基准）。"""
+        app = QApplication.instance()
+        if app is None:
+            return
+        f = QFont(self._base_ui_font)
+        fam = i18n.resolve_ui_font(i18n.lang())
+        if fam:
+            f.setFamily(fam)
+        app.setFont(f)
+
+    def _retranslate(self, code: str):
+        """切换界面语言：只动显示文字与字体，水印内容、下拉框规范值都不变。"""
+        code = i18n.set_lang(code)
+        self._lang = code
+        self._persist_lang()
+        # 1) 值类下拉框：换显示文字，itemData（中文 key）不动。
+        #    blockSignals：setItemText 会触发 currentTextChanged → 预设槽
+        #    再跑一遍（启动早期 _preview_timer 还没建时会直接崩）。
+        for cb in getattr(self, "_key_combos", []):
+            cb.blockSignals(True)
+            for i in range(cb.count()):
+                key = cb.itemData(i)
+                if isinstance(key, str) and key:
+                    cb.setItemText(i, i18n.tr(key))
+            cb.blockSignals(False)
+        # 2) 静态控件（文字 / 占位提示 / tooltip）
+        for w, kind, key in getattr(self, "_i18n_static", []):
+            try:
+                if kind == "text":
+                    w.setText(i18n.tr(key))
+                elif kind == "placeholder":
+                    w.setPlaceholderText(i18n.tr(key))
+                elif kind == "tooltip":
+                    w.setToolTip(i18n.tr(key))
+            except Exception:
+                pass                                    # 控件已被销毁等情况不拖垮切换
+        # 3) 动态文字按当前状态重刷
+        self.setWindowTitle(i18n.tr("一键水印工具（Word / 视频）"))
+        self.status_label.setText(
+            i18n.tr(getattr(self, "_status_key", "") or "就绪"))
+        self._office_refresh_info()
+        self._v_update_pos_label()
+        self._refresh_color_btns()
+        # 4) 字体随语言切换（繁体/日/韩/俄等各用对应字体族）
+        self._apply_ui_font()
 
     def _build_video_section(self):
         """构建右侧“视频水印”整列：输入/输出行（在组框上方） + 视频水印组框。
@@ -1304,7 +1516,7 @@ class App(QMainWindow):
         """
         if combo is None:
             combo = self.v_text_pos_combo
-        name = combo.currentText()
+        name = _combo_key(combo)
         p = _V_POSITIONS.get(name, (0.82, 0.85))
         if p is not None:
             return p
@@ -1321,15 +1533,15 @@ class App(QMainWindow):
         """手改 X/Y 或在预览帧上拖拽后，把位置下拉切到「自定义」。"""
         if getattr(self, "_v_pos_applying", False):
             return
-        if combo.currentText() == "自定义":
+        if _combo_key(combo) == "自定义":
             return
         combo.blockSignals(True)
-        combo.setCurrentText("自定义")
+        combo.setCurrentIndex(combo.findData("自定义"))   # 按 key 定位，换语言也点得准
         combo.blockSignals(False)
 
     def _v_fill_xy(self, combo, x_spin, y_spin):
         """选了预设锚点 → 把该锚点回填进 X/Y 输入，用户可直接在此基础上微调。"""
-        p = _V_POSITIONS.get(combo.currentText())
+        p = _V_POSITIONS.get(_combo_key(combo))
         if p is None:      # 「自定义」不覆盖
             return
         self._v_pos_applying = True
@@ -1364,11 +1576,11 @@ class App(QMainWindow):
         """全局播放方式变动时，让两个“跟随”下拉跟着走。"""
         for combo in (getattr(self, "v_text_motion_combo", None),
                       getattr(self, "v_img_motion_combo", None)):
-            if combo is not None and combo.currentText() == "跟随":
-                combo.setCurrentText(_V_MOTION_INVERSE.get(self._v_motion(), "跟随"))
+            if combo is not None and _combo_key(combo) == "跟随":
+                combo.setCurrentIndex(combo.findData(_V_MOTION_INVERSE.get(self._v_motion(), "跟随")))
 
     def _v_browse_src(self):
-        p, _ = QFileDialog.getOpenFileName(self, "选择视频文件", "",
+        p, _ = QFileDialog.getOpenFileName(self, i18n.tr("选择视频文件"), "",
                                            "视频 (*.mp4 *.mkv *.avi *.mov *.wmv *.flv *.webm *.mpeg *.mpg *.ts *.m4v *.3gp);;All (*.*)")
         if p:
             self.v_src_edit.setText(p)
@@ -1378,12 +1590,12 @@ class App(QMainWindow):
             self._v_grab_frame()     # 选完视频自动抓一帧预览，方便立即看效果
 
     def _v_browse_out(self):
-        p, _ = QFileDialog.getSaveFileName(self, "选择输出视频", "", "MP4 (*.mp4);;All (*.*)")
+        p, _ = QFileDialog.getSaveFileName(self, i18n.tr("选择输出视频"), "", "MP4 (*.mp4);;All (*.*)")
         if p:
             self.v_out_edit.setText(p)
 
     def _v_browse_img(self):
-        p, _ = QFileDialog.getOpenFileName(self, "选择水印图片", "",
+        p, _ = QFileDialog.getOpenFileName(self, i18n.tr("选择水印图片"), "",
                                            "图片 (*.png *.jpg *.jpeg *.webp *.pdf);;All (*.*)")
         if p:
             self.v_img_edit.setText(p)
@@ -1425,13 +1637,13 @@ class App(QMainWindow):
         return 60
 
     def _v_out_crf(self):
-        return video_mod.CRF_PRESETS.get(self.v_crf_combo.currentText(), 18)
+        return video_mod.CRF_PRESETS.get(_combo_key(self.v_crf_combo), 18)
 
     def _v_pick_color(self):
         c = QColorDialog.getColor(QColor(*self.v_color), self, "选择水印文字颜色")
         if c.isValid():
             self.v_color = (c.red(), c.green(), c.blue())
-            self.v_color_btn.setText(f"颜色: RGB{self.v_color}")
+            self._refresh_color_btns()
 
     def _v_gather_opts(self):
         kinds = []
@@ -1512,17 +1724,18 @@ class App(QMainWindow):
     def _v_update_pos_label(self):
         """位置摘要：优先显示「自定义」落点，否则显示当前预设对应的 X/Y。"""
         if getattr(self, "v_custom_pos", None):
-            self.v_pos_lbl.setText(
-                f"自定义位置：X {self.v_custom_pos[0]*100:.0f}%  "
-                f"Y {self.v_custom_pos[1]*100:.0f}%")
+            self.v_pos_lbl.setText(i18n.trf(
+                "自定义位置：X {x:.0f}% Y {y:.0f}%",
+                x=self.v_custom_pos[0] * 100, y=self.v_custom_pos[1] * 100))
             return
         tpos = self._v_position(self.v_text_pos_combo,
                                 self.v_text_x_spin, self.v_text_y_spin)
         ipos = self._v_position(self.v_img_pos_combo,
                                 self.v_img_x_spin, self.v_img_y_spin)
-        self.v_pos_lbl.setText(
-            f"文字 X {tpos[0]*100:.0f}% Y {tpos[1]*100:.0f}% ｜ "
-            f"图片 X {ipos[0]*100:.0f}% Y {ipos[1]*100:.0f}%")
+        self.v_pos_lbl.setText(i18n.trf(
+            "文字 X {tx:.0f}% Y {ty:.0f}% ｜ 图片 X {ix:.0f}% Y {iy:.0f}%",
+            tx=tpos[0] * 100, ty=tpos[1] * 100,
+            ix=ipos[0] * 100, iy=ipos[1] * 100))
 
     def _v_preview_time(self):
         """预览取第几秒的画面（滚动水印可借此看不同时刻的位置）。"""
@@ -1556,8 +1769,8 @@ class App(QMainWindow):
             # 无源视频：用示意画面，保证「先预览后选片」也走得通
             self._v_last_frame = self._v_placeholder_frame()
             self._v_show_frame()
-            self.v_status_lbl.setText(
-                "未选择视频，当前为 16:9 示意画面；选好视频后会自动换成真实帧。")
+            self.v_status_lbl.setText(i18n.tr(
+                "未选择视频，当前为 16:9 示意画面；选好视频后会自动换成真实帧。"))
             return
         opts = self._v_gather_opts()
         try:
@@ -1613,7 +1826,7 @@ class App(QMainWindow):
                 sp.setValue(round(fy * 100))
             for cb in (self.v_text_pos_combo, self.v_img_pos_combo):
                 cb.blockSignals(True)
-                cb.setCurrentText("自定义")
+                cb.setCurrentIndex(cb.findData("自定义"))     # 按 key 定位，不受界面语言影响
                 cb.blockSignals(False)
         finally:
             self._v_pos_applying = False
@@ -1640,7 +1853,7 @@ class App(QMainWindow):
         stem, _ = os.path.splitext(os.path.basename(src))
         out = os.path.join(tempfile.gettempdir(), f"WriteMark_preview_{stem}.mp4")
         self._v_preview_out = out
-        self.v_status_lbl.setText("正在生成预览短片（前 3 秒），请稍候…")
+        self.v_status_lbl.setText(i18n.tr("正在生成预览短片（前 3 秒），请稍候…"))
         self.v_play_btn.setEnabled(False)
         self.v_grab_btn.setEnabled(False)
         w = VideoWorker(src, out, opts, max_seconds=3)
@@ -1657,7 +1870,7 @@ class App(QMainWindow):
             if out and os.path.exists(out):
                 try:
                     os.startfile(out)      # Windows：用系统默认播放器打开
-                    self.v_status_lbl.setText("已生成预览短片，正在用系统播放器打开…")
+                    self.v_status_lbl.setText(i18n.tr("已生成预览短片，正在用系统播放器打开…"))
                 except Exception as e:
                     self.v_status_lbl.setText(f"预览短片已生成，但无法自动打开：{e}")
             else:
@@ -1737,15 +1950,16 @@ class App(QMainWindow):
         if total:
             pct = int(cur / total * 100)
             self.v_progress.setValue(pct)
-            self.v_status_lbl.setText(f"处理中：{cur}/{total} 帧（{pct}%）")
+            self.v_status_lbl.setText(i18n.trf(
+                "处理中：{cur}/{total} 帧（{pct}%）", cur=cur, total=total, pct=pct))
 
     def _v_on_result(self, ok, msg):
         if ok:
-            self.v_status_lbl.setText("任务已完成：" + msg)
-            QMessageBox.information(self, "任务已完成", "任务已完成")
+            self.v_status_lbl.setText(i18n.trf("任务已完成：{msg}", msg=msg))
+            QMessageBox.information(self, i18n.tr("任务已完成"), i18n.tr("任务已完成"))
         else:
-            self.v_status_lbl.setText("失败：" + msg)
-            QMessageBox.critical(self, "失败", msg)
+            self.v_status_lbl.setText(i18n.trf("失败：{msg}", msg=msg))
+            QMessageBox.critical(self, i18n.tr("失败"), msg)
 
     def _v_on_finished(self):
         self._v_worker = None
@@ -1756,7 +1970,7 @@ class App(QMainWindow):
     def _v_cancel(self):
         if getattr(self, "_v_worker", None) and self._v_worker.isRunning():
             self._v_worker.request_stop()
-            self.v_status_lbl.setText("已请求取消，正在收尾…")
+            self.v_status_lbl.setText(i18n.tr("已请求取消，正在收尾…"))
 
     @staticmethod
     def _fmt_hint(text):
@@ -1787,14 +2001,14 @@ class App(QMainWindow):
         for b in (getattr(self, "_btn_fix", None), getattr(self, "_btn_revert", None)):
             if b:
                 b.setEnabled(False)
-        self.status_label.setText("处理中…")
+        self.status_label.setText(i18n.tr("处理中…"))
         worker.start()
 
     def _office_done(self, ok, msg, need_admin=False):
         for b in (getattr(self, "_btn_fix", None), getattr(self, "_btn_revert", None)):
             if b:
                 b.setEnabled(True)
-        self.status_label.setText("就绪")
+        self.status_label.setText(i18n.tr("就绪"))
         self._exit_detail.append(msg)
         # 输出框在页面下方的「日志」区：顺手滚到它，免得用户以为按钮点了没反应
         try:
@@ -1822,7 +2036,7 @@ class App(QMainWindow):
                                 "未能启动提权进程（UAC 被拒绝或环境不允许）。\n"
                                 "可改用：右键本程序 →「以管理员身份运行」，再点一次「一键修复」。")
             return
-        self.status_label.setText("等待管理员操作…")
+        self.status_label.setText(i18n.tr("等待管理员操作…"))
 
         def poll():
             res = otw.read_result()
@@ -1844,7 +2058,7 @@ class App(QMainWindow):
         与右侧加固框对不齐）；完整摘要放进 tooltip，长报告走「诊断」按钮输出。
         """
         if otw is None:
-            self._exit_info.setText("诊断模块不可用")
+            self._exit_info.setText(i18n.tr("诊断模块不可用"))
             return
         try:
             d = otw.diagnose()
@@ -2064,10 +2278,10 @@ class App(QMainWindow):
         """
         if getattr(self, "_pos_applying", False):
             return
-        if combo is None or combo.currentText() == "自定义":
+        if combo is None or _combo_key(combo) == "自定义":
             return
         combo.blockSignals(True)
-        combo.setCurrentText("自定义")
+        combo.setCurrentIndex(combo.findData("自定义"))     # 按 key 定位，不受界面语言影响
         combo.blockSignals(False)
 
     def _apply_pos_preset(self, preset, x_spin, y_spin):
@@ -2083,11 +2297,15 @@ class App(QMainWindow):
             self._pos_applying = False
         self._schedule_preview()
 
-    def _on_text_pos_preset(self, preset):
-        self._apply_pos_preset(preset, self.text_offx_spin, self.text_offy_spin)
+    def _on_text_pos_preset(self, _preset=None):
+        # 注意：这个槽由 currentTextChanged 触发，参数是【显示文字】；
+        # 界面切到外文后显示文字≠中文 key，所以一律回控件里取规范 key。
+        self._apply_pos_preset(_combo_key(self.text_pos_combo),
+                               self.text_offx_spin, self.text_offy_spin)
 
-    def _on_img_pos_preset(self, preset):
-        self._apply_pos_preset(preset, self.img_offx_spin, self.img_offy_spin)
+    def _on_img_pos_preset(self, _preset=None):
+        self._apply_pos_preset(_combo_key(self.img_pos_combo),
+                               self.img_offx_spin, self.img_offy_spin)
 
     def _on_text_enabled(self, state):
         self.text_enabled = self.text_chk.isChecked()
@@ -2217,7 +2435,7 @@ class App(QMainWindow):
         c = QColorDialog.getColor(QColor(*self.color), self, "选择文本水印颜色")
         if c.isValid():
             self.color = (c.red(), c.green(), c.blue())
-            self.color_btn.setText(f"文本颜色: RGB{self.color}")
+            self._refresh_color_btns()
             self._schedule_preview()
 
     # -------------------------------------------------------------- actions

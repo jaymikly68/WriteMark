@@ -38,9 +38,11 @@ def find_str_consts(co):
 
     注意：像 `{"仿宋": ("simfang.ttf",)}` 这样的字典常量，其值元组在字节码里是
     一个整体常量对象，必须深入容器才能取到 "simfang.ttf"，否则会误判“未编入”。
+    容器还可能嵌套（如 LANGS 被整体折叠成「元组的元组」），所以要一路递归进去。
     """
     found = []
     stack = [co]
+    seen = set()
     while stack:
         c = stack.pop()
         for k in getattr(c, "co_consts", []):
@@ -49,12 +51,26 @@ def find_str_consts(co):
             elif hasattr(k, "co_consts"):
                 stack.append(k)
             elif isinstance(k, (tuple, list, frozenset, set)):
+                if id(k) in seen:
+                    continue
+                seen.add(id(k))
                 for item in k:
                     if isinstance(item, str):
                         found.append(item)
+                    elif isinstance(item, (tuple, list, frozenset, set)):
+                        if id(item) not in seen:      # 嵌套容器（元组的元组等）
+                            seen.add(id(item))
+                            stack.append(_ConstBox(item))
                     elif hasattr(item, "co_consts"):
                         stack.append(item)
     return found
+
+
+class _ConstBox:
+    """把裸容器包一层，让 find_str_consts 的主循环能用 getattr(co_consts) 读它。"""
+
+    def __init__(self, seq):
+        self.co_consts = seq
 
 
 def collect_names(co):
@@ -143,15 +159,23 @@ def main():
         # 视频框内的空白进度条移到窗口底部状态行（v_progress 仍在，位置变了）
         has_layout44 = ("_MatchBottom" in names and "_v_bottom_eq" in names
                         and "v_progress" in names and "v_frame_label" in names)
+        # v1.5.0 多语言界面（Polyglot UI）：i18n 切换机制编入 gui
+        # （后台守护并入视频列由 f_watch/_MatchBottom tail 覆盖，上面已校验）
+        has_i18n = ("_retranslate" in names and "_bind_combo_keys" in names
+                    and "_i18n_scan" in names and "_apply_ui_font" in names
+                    and "_load_saved_lang" in names and "_combo_key" in names
+                    and "i18n" in names)
         print(f"watermark_tool.gui: 含字体相关 _maybe_load_word_fonts/_apply_word_fonts/FontWorker"
               f" + 可编辑下拉框(Editable/Completer/CompletionMode/FilterMode/Model) -> {has_new}; "
               f"中西文字体双下拉框 -> {has_split_ui}; "
               f"防去除加固(平铺/冗余) -> {has_harden}; 系统托盘常驻 -> {has_tray}; "
               f"v1.4.2 版式(两列等高/视频行上移) -> {has_layout42}; "
               f"v1.4.3 版式(秒退框并入左列/与加固同带) -> {has_layout43}; "
-              f"v1.4.4 版式(视频框底边齐平预览框/进度条移出视频框) -> {has_layout44}")
+              f"v1.4.4 版式(视频框底边齐平预览框/进度条移出视频框) -> {has_layout44}; "
+              f"v1.5.0 多语言界面(Polyglot UI) -> {has_i18n}")
         if (not has_new or not has_split_ui or not has_harden or not has_tray
-                or not has_layout42 or not has_layout43 or not has_layout44):
+                or not has_layout42 or not has_layout43 or not has_layout44
+                or not has_i18n):
             ok = False
 
     if docx is None:
@@ -263,6 +287,23 @@ def main():
         has_com_cleanup_ref = "com_cleanup" in wf_names
         print(f"watermark_tool.word_fonts: 引用 com_cleanup 收尾 Word -> {has_com_cleanup_ref}")
         if not has_com_cleanup_ref:
+            ok = False
+
+    # ---- 多语言界面（v1.5.0）：i18n 词表模块必须编入（8 语言 + 字体解析） ----
+    i18nmod = mods.get("watermark_tool.i18n")
+    if i18nmod is None:
+        print("[缺失] watermark_tool.i18n 未在归档中找到（多语言界面将失效）")
+        ok = False
+    else:
+        inames = collect_names(i18nmod)
+        iconsts = find_str_consts(i18nmod)
+        has_api = {"set_lang", "tr", "trf", "resolve_ui_font"} <= inames
+        has_langs = all(any(c == n for c in iconsts)
+                        for n in ("简体中文", "繁體中文", "English",
+                                  "日本語", "한국어", "Русский", "Deutsch", "Français"))
+        print(f"watermark_tool.i18n: API(set_lang/tr/trf/resolve_ui_font) -> {has_api}; "
+              f"8 语言词表齐备 -> {has_langs}")
+        if not has_api or not has_langs:
             ok = False
 
     # ---- 视频水印（v1.1.8）：与 Word 水印完全独立的模块 + 自带 ffmpeg 二进制 ----
