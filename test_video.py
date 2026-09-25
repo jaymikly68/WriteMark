@@ -14,6 +14,7 @@ import imageio.v2 as iio
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QCoreApplication
 from PySide6.QtWidgets import QApplication, QMessageBox
 from docx import Document
 from PIL import Image
@@ -132,9 +133,56 @@ def test_gui_clear_choice_dialog(monkeypatch):
     print("GUI 清除弹窗选项映射 PASS")
 
 
+def test_gui_video_run_button_clicked(monkeypatch):
+    """回归：点击视频分区「开始加水印」必须真的跑起来，且按钮是蓝底黑字高亮。
+
+    历史 bug：_vrun 里写成 self.v_gather_opts()（实际方法名是 _v_gather_opts），
+    点击后抛 AttributeError 被 Qt 静默吞掉 —— 冻结 exe 无控制台，表现为
+    “点了没反应”。这里用真实视频走一遍点击路径，确保产出文件。
+    """
+    d = tempfile.mkdtemp()
+    src = os.path.join(d, "src.mp4")
+    out = os.path.join(d, "out.mp4")
+    _make_video(src)
+
+    app = QApplication.instance() or QApplication([])
+    w = App()
+
+    # 弹窗不阻塞测试
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)
+    monkeypatch.setattr(QMessageBox, "critical", lambda *a, **k: None)
+
+    # 按钮高亮（蓝底黑字）
+    ss = w.v_run_btn.styleSheet()
+    assert "#1a73e8" in ss and "color:#000" in ss, f"「开始加水印」应为蓝底黑字，实际样式: {ss}"
+
+    w.v_src_edit.setText(src)
+    w.v_out_edit.setText(out)
+    w.v_text_chk.setChecked(True)
+    w.v_img_chk.setChecked(False)
+
+    import time
+    w._v_run()          # 直接走槽函数入口（含异常兜底）
+    # 必须手动泵事件循环：worker 的 result/progress/finished 都是排队连接，
+    # 主线程只 sleep 的话信号不会投递，按钮就一直停在“处理中”。
+    for _ in range(160):
+        QCoreApplication.processEvents()
+        worker = getattr(w, "_v_worker", None)
+        if not (worker and worker.isRunning()):
+            break
+        time.sleep(0.25)
+    QCoreApplication.processEvents()
+
+    assert os.path.exists(out) and os.path.getsize(out) > 0, "点击后应产出带水印的视频"
+    assert w.v_run_btn.isEnabled(), "处理结束后「开始加水印」应恢复可用"
+    print("GUI 视频「开始加水印」点击生效 PASS")
+
+
 if __name__ == "__main__":
     from pytest import MonkeyPatch
     test_video_fixed_and_scroll()
     test_docx_detect_and_clear_by_kind()
     test_gui_clear_choice_dialog(MonkeyPatch())
+    test_gui_video_run_button_clicked(MonkeyPatch())
     print("\nALL PASS")

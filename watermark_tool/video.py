@@ -145,7 +145,16 @@ def add_video_watermark(src: str, output: str, opts: dict,
         W, H = meta["size"]
     except Exception:
         W, H = 1280, 720
-    total = meta.get("nframes", 0) or 0
+    # 部分容器（mp4/mov 等）imageio 无法预知总帧数，nframes 可能是 inf/0/极大值。
+    # 直接把这种值透传给进度回调会让 Qt 信号溢出 -> 整个任务被判失败，故在此收敛为 0。
+    total = 0
+    try:
+        _nf = meta.get("nframes", 0)
+        _nf = float(_nf)
+        if _nf == _nf and _nf > 0 and _nf < 10_000_000:  # 排除 nan / inf / 异常大值
+            total = int(_nf)
+    except Exception:
+        total = 0
 
     # 水印图层与帧尺寸相关、但与帧内容无关：仅构造一次，循环里只换位置，省大量 CPU
     layers = _layers_for_frame(W, H, kinds, text_cfg, image_cfg)

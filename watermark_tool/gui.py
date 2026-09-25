@@ -14,6 +14,7 @@ PySide6 (Qt) 一键 GUI：选择 Word 文件 → 设置文本/图像水印 → �
 from __future__ import annotations
 
 import os
+import tempfile
 import sys
 import threading
 
@@ -44,6 +45,17 @@ except Exception as _video_err:  # pragma: no cover
             _f.write("".join(_tb.format_exception(_video_err)))
     except Exception:
         pass
+
+# 主操作按钮统一高亮样式：蓝底黑字（插入/去除/视频开始加水印等）
+BTN_HL = (
+    "QPushButton {"
+    "  background-color:#1a73e8; color:#000; font-weight:700;"
+    "  border:2px solid #0b57d0; border-radius:6px;"
+    "  padding:8px 16px; min-height:34px;"
+    "}"
+    "QPushButton:hover { background-color:#2b82f1; }"
+    "QPushButton:pressed { background-color:#0b57d0; }"
+)
 
 
 class Worker(QThread):
@@ -124,7 +136,9 @@ class VideoWorker(QThread):
         try:
             res = video_mod.add_video_watermark(
                 self.src, self.output, self.opts,
-                progress_fn=lambda c, t: self.progress_signal.emit(c, t),
+                # 兜底：进度值强制为安全 int（极端元数据下可能传进非有限值）
+                progress_fn=lambda c, t: self.progress_signal.emit(
+                    int(c), int(t) if isinstance(t, (int, float)) and t == t and t > 0 else 0),
                 stop_check=lambda: self._stop,
             )
             self.result_signal.emit(True, str(res))
@@ -354,16 +368,7 @@ class App(QMainWindow):
         h_types.addWidget(f_img)
         root.addLayout(h_types)
 
-        # ---------------- 按钮（插入/清除设为蓝底黑字高亮，突出主操作）
-        BTN_HL = (
-            "QPushButton {"
-            "  background-color:#1a73e8; color:#000; font-weight:700;"
-            "  border:2px solid #0b57d0; border-radius:6px;"
-            "  padding:8px 16px; min-height:34px;"
-            "}"
-            "QPushButton:hover { background-color:#2b82f1; }"
-            "QPushButton:pressed { background-color:#0b57d0; }"
-        )
+        # ---------------- 按钮（插入/清除设为蓝底黑字高亮，突出主操作）----------------
         hb = QHBoxLayout()
         self._btn_insert = QPushButton("一键插入水印"); self._btn_insert.clicked.connect(self._insert)
         self._btn_insert.setStyleSheet(BTN_HL); hb.addWidget(self._btn_insert)
@@ -573,6 +578,7 @@ class App(QMainWindow):
         # 运行按钮 + 进度 + 取消
         hr = QHBoxLayout()
         self.v_run_btn = QPushButton("开始加水印"); self.v_run_btn.clicked.connect(self._v_run)
+        self.v_run_btn.setStyleSheet(BTN_HL)          # 与主操作一致：蓝底黑字高亮
         self.v_cancel_btn = QPushButton("取消"); self.v_cancel_btn.setEnabled(False); self.v_cancel_btn.clicked.connect(self._v_cancel)
         hr.addWidget(self.v_run_btn); hr.addWidget(self.v_cancel_btn)
         v.addLayout(hr)
@@ -638,11 +644,32 @@ class App(QMainWindow):
         }
 
     def _v_run(self):
+        # 冻结版没有控制台，槽函数里任何异常都会被 Qt 静默吞掉、表现为“点了没反应”，
+        # 因此这里统一兜底：出错也要把原因显示给用户，绝不留一个死按钮。
+        try:
+            self._v_run_inner()
+        except Exception as e:
+            import traceback
+            self.v_run_btn.setEnabled(True)
+            self.v_cancel_btn.setEnabled(False)
+            self.v_status_lbl.setText("失败：" + str(e))
+            QMessageBox.critical(self, "失败", f"视频水印处理失败：\n{e}")
+            try:
+                with open(os.path.join(tempfile.gettempdir(),
+                                       "WriteMark_video_err.log"), "w",
+                          encoding="utf-8") as f:
+                    f.write(traceback.format_exc())
+            except Exception:
+                pass
+
+    def _v_run_inner(self):
         src = self.v_src_edit.text().strip()
         if not src or not os.path.exists(src):
             QMessageBox.warning(self, "提示", "请先选择有效的视频文件。")
             return
-        kinds = [k for k in self._v_gather_opts()["kinds"]]
+        # 注意：方法名带下划线前缀 _v_gather_opts
+        opts = self._v_gather_opts()
+        kinds = list(opts["kinds"])
         if not kinds:
             QMessageBox.warning(self, "提示", "请至少启用一种水印（文字或图片）。")
             return
@@ -654,7 +681,6 @@ class App(QMainWindow):
             base, _ = os.path.splitext(src)
             out = base + "WaterMark.mp4"
             self.v_out_edit.setText(out)
-        opts = self.v_gather_opts()
         self.v_run_btn.setEnabled(False)
         self.v_cancel_btn.setEnabled(True)
         self.v_progress.setValue(0)
