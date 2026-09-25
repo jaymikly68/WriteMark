@@ -756,6 +756,49 @@ class App(QMainWindow):
             "这样它们就找不到、删不干净。对肉眼外观没有任何影响。")
         vh.addWidget(self.redundant_chk)
 
+        # ---------------- Word 秒退（修复关闭 Word 卡顿） ----------------
+        # 位置：嵌在「文本水印」列组框的**正下方**，与右侧「防去除加固」同处一条水平带
+        # （顶边由布局自然对齐、底边由 _EqualBottoms 拉平）。
+        # 为让这一带高度落在加固框的自然高度上，框内只留两行：
+        # 动作按钮（诊断/一键修复/测速/还原） + 可选加码与一行诊断摘要。
+        # 详细诊断输出移到下方「日志」区顶部的文本框——原来嵌在这里的 66px 输出区
+        # 会把这一带撑高一倍，与加固框就对不齐了。
+        f_exit = self._make_group("Word 秒退（修复关闭 Word 时的十几秒卡顿）")
+        vex = f_exit.layout()
+        vex.setSpacing(6)
+        hex_ = QHBoxLayout(); hex_.setSpacing(6)
+        b = QPushButton("诊断")
+        b.setToolTip("列出 Office 版本 / 登录状态 / 加载项 LoadBehavior / 用户级与组策略开关，\n"
+                    "结果输出到下方「日志」区顶部的诊断框。")
+        b.clicked.connect(self._office_diagnose); hex_.addWidget(b)
+        self._btn_fix = QPushButton("一键修复")
+        self._btn_fix.setToolTip("只禁加载项 + 关遥测，不动你的登录状态；会自动备份，可随时「还原」。\n"
+                                 "结果输出到下方「日志」区顶部的诊断框。")
+        self._btn_fix.clicked.connect(self._office_fix); hex_.addWidget(self._btn_fix)
+        b = QPushButton("测速")
+        b.setToolTip("实测关闭 Word 的耗时（对比修复前后），结果输出到下方「日志」区顶部的诊断框。")
+        b.clicked.connect(self._office_bench); hex_.addWidget(b)
+        self._btn_revert = QPushButton("还原")
+        self._btn_revert.setToolTip("把「一键修复」写过的开关恢复成修复前的快照。")
+        self._btn_revert.clicked.connect(self._office_revert); hex_.addWidget(self._btn_revert)
+        hex_.addStretch(1)
+        vex.addLayout(hex_)
+        hopt = QHBoxLayout(); hopt.setSpacing(6)
+        b = QPushButton("可选加码（慎用）")
+        b.setStyleSheet("color:#b00;")
+        b.setToolTip("会改变 Office 的账户与联网行为：禁止登录会把已登录账号踢下线、关闭在线内容下载，\n"
+                    "必须二次确认后才会写入。完整说明见弹窗与下方诊断输出。")
+        b.clicked.connect(self._office_optional); hopt.addWidget(b)
+        # 诊断摘要只放一行短文本（完整信息在 tooltip 与「日志」区诊断框里）：
+        # 窄列里一旦换行会把这一带顶高，就与右侧加固框对不齐了。
+        self._exit_info = QLabel("未检测")
+        self._exit_info.setStyleSheet("color:#666; font-size:11px;")
+        hopt.addWidget(self._exit_info, 1)
+        vex.addLayout(hopt)
+        f_exit.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        # 秒退框与加固框【顶底同高】：并排的两块取两者高度的较大值
+        self._band_eq = _EqualBottoms(f_hard, f_exit)
+
         # 预览
         f_prev = self._make_group("水印预览（示意，脱离 Word 直接查看）")
         vp = f_prev.layout()
@@ -782,8 +825,17 @@ class App(QMainWindow):
         f_hard.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         f_prev.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
 
-        # ---------------- 图像水印列 = 图像水印组框 + 其正下方的「防去除加固」----------------
-        # 两者同宽（同一列容器 → 自动等宽），竖直堆叠，与左侧文本水印列底部基本齐平。
+        # ---------------- 两列 = 「文本水印 + Word 秒退」列 / 「图像水印 + 防去除加固」列 ----------------
+        # 每列一个容器：容器内两个组框自动等宽（同一列宽），两列并排 → 上下两条水平带对齐。
+        # （v1.4.2 起：上面一条带是文本水印/图像水印，下面一条带是 Word 秒退/防去除加固）
+        col_text = QWidget()
+        vct = QVBoxLayout(col_text)
+        vct.setContentsMargins(0, 0, 0, 0)
+        vct.setSpacing(8)
+        vct.addWidget(f_text, 0, Qt.AlignTop)
+        vct.addWidget(f_exit, 0, Qt.AlignTop)
+        vct.addStretch(1)
+
         col_img = QWidget()
         vci = QVBoxLayout(col_img)
         vci.setContentsMargins(0, 0, 0, 0)
@@ -797,7 +849,7 @@ class App(QMainWindow):
 
         h_types = QHBoxLayout()
         h_types.setSpacing(8)
-        h_types.addWidget(f_text, 0, Qt.AlignTop)     # 顶对齐：列高收缩到内容后不悬在行中间
+        h_types.addWidget(col_text, 0, Qt.AlignTop)   # 顶对齐：列高收缩到内容后不悬在行中间
         h_types.addWidget(col_img, 0, Qt.AlignTop)
         h_types.addStretch(1)          # 只占两列宽，剩余宽度整块留给右侧视频列
         vl.addLayout(h_types)
@@ -838,39 +890,16 @@ class App(QMainWindow):
         vw.addLayout(row)
         root.addWidget(f_watch)
 
-        # ---------------- Word 秒退（关闭卡顿） ----------------
-        f_exit = self._make_group("Word 秒退（修复关闭 Word 时的十几秒卡顿）")
-        vex = f_exit.layout()
-        self._exit_info = QLabel("未检测")
-        self._exit_info.setWordWrap(True)
-        self._exit_info.setStyleSheet("color:#444;")
-        vex.addWidget(self._exit_info)
-        hex_ = QHBoxLayout()
-        b = QPushButton("诊断"); b.clicked.connect(self._office_diagnose); hex_.addWidget(b)
-        self._btn_fix = QPushButton("一键修复"); self._btn_fix.clicked.connect(self._office_fix); hex_.addWidget(self._btn_fix)
-        b = QPushButton("测速"); b.clicked.connect(self._office_bench); hex_.addWidget(b)
-        self._btn_revert = QPushButton("还原"); self._btn_revert.clicked.connect(self._office_revert); hex_.addWidget(self._btn_revert)
-        vex.addLayout(hex_)
-        # 可选加码默认不写：这些项会改变 Office 联网行为，甚至把已登录的账号踢下线，
-        # 必须由用户显式确认后才会动，不能混进「一键修复」
-        hopt = QHBoxLayout()
-        b = QPushButton("可选加码（会踢账号，慎用）")
-        b.setStyleSheet("color:#b00;")
-        b.clicked.connect(self._office_optional); hopt.addWidget(b)
-        lbl = QLabel("「一键修复」只禁加载项 + 关遥测，不动登录状态")
-        lbl.setStyleSheet("color:#666;")
-        hopt.addWidget(lbl, 1)
-        vex.addLayout(hopt)
+        # 日志（含「Word 秒退」的诊断 / 修复 / 测速输出框）
+        f_log = self._make_group("日志")
+        vlog = f_log.layout()
         self._exit_detail = QTextEdit(); self._exit_detail.setReadOnly(True)
         self._exit_detail.setFixedHeight(66)
-        self._exit_detail.setPlaceholderText("诊断 / 修复 / 测速结果会显示在这里")
-        vex.addWidget(self._exit_detail)
-        root.addWidget(f_exit)
-
-        # 日志
-        f_log = self._make_group("日志")
-        vl = f_log.layout()
-        self.log_text = QTextEdit(); self.log_text.setReadOnly(True); vl.addWidget(self.log_text)
+        self._exit_detail.setPlaceholderText(
+            "「Word 秒退」的诊断 / 修复 / 测速结果会显示在这里")
+        self._exit_detail.setToolTip("「Word 秒退」按钮的输出（诊断报告、修复结果、关闭 Word 实测耗时）。")
+        vlog.addWidget(self._exit_detail)
+        self.log_text = QTextEdit(); self.log_text.setReadOnly(True); vlog.addWidget(self.log_text)
         root.addWidget(f_log, 1)
 
         self.status_label = QLabel("就绪"); root.addWidget(self.status_label)
@@ -1698,6 +1727,13 @@ class App(QMainWindow):
                 b.setEnabled(True)
         self.status_label.setText("就绪")
         self._exit_detail.append(msg)
+        # 输出框在页面下方的「日志」区：顺手滚到它，免得用户以为按钮点了没反应
+        try:
+            sa = self.centralWidget()
+            if isinstance(sa, QScrollArea):
+                sa.ensureWidgetVisible(self._exit_detail, 20, 20)
+        except Exception:
+            pass
         self._office_refresh_info()
         if need_admin and not otw.is_admin():
             ask = QMessageBox.question(
@@ -1733,6 +1769,11 @@ class App(QMainWindow):
         self._elevate_timer = t
 
     def _office_refresh_info(self):
+        """刷新秒退框里的诊断摘要。
+
+        只显示一行短文本（秒退框与图像水印列并排、宽度有限，换行会把这一带顶高，
+        与右侧加固框对不齐）；完整摘要放进 tooltip，长报告走「诊断」按钮输出。
+        """
         if otw is None:
             self._exit_info.setText("诊断模块不可用")
             return
@@ -1747,7 +1788,12 @@ class App(QMainWindow):
         if not d["policy_writable"]:
             bits.append("组策略被锁（需管理员）")
         bits.append("管理员权限：是" if d["admin"] else "管理员权限：否")
-        self._exit_info.setText("  ·  ".join(bits))
+        full = "  ·  ".join(bits)
+        # 短摘要：版本 + 免管理员项进度 + 权限（其余信息在 tooltip 里）
+        short = "免管 %d/%d · %s" % (
+            d["applied_user"], d["total_user"], "有管理员" if d["admin"] else "无管理员")
+        self._exit_info.setText(short)
+        self._exit_info.setToolTip(full)
 
     def _office_diagnose(self):
         if otw is None:
