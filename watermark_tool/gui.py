@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QPushButton, QLabel, QFileDialog, QComboBox, QCompleter,
     QDoubleSpinBox, QCheckBox, QSlider, QTextEdit, QColorDialog, QMessageBox,
     QScrollArea, QSystemTrayIcon, QMenu, QStyle, QProgressBar,
-    QButtonGroup, QRadioButton,
+    QButtonGroup, QRadioButton, QSizePolicy,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QStringListModel, QEvent
 from PySide6.QtGui import QColor, QImage, QPixmap, QIntValidator
@@ -58,18 +58,18 @@ BTN_HL = (
     "QPushButton:pressed { background-color:#0b57d0; }"
 )
 
-# 次操作按钮高亮样式：灰底黑字（视频水印的「取消」），与主操作（蓝底黑字）区分
-BTN_GRAY = (
+# 危险操作按钮：深褐底 + 红字（视频水印的「取消」），与主/次操作配色明显区分
+BTN_BROWN = (
     "QPushButton {"
-    "  background-color:#9aa0a6; color:#000; font-weight:700;"
-    "  border:2px solid #5f6368; border-radius:6px;"
+    "  background-color:#4a2b16; color:#ff3b30; font-weight:700;"
+    "  border:2px solid #2f1a0c; border-radius:6px;"
     "  padding:8px 16px; min-height:34px;"
     "}"
-    "QPushButton:hover { background-color:#adb5bd; }"
-    "QPushButton:pressed { background-color:#80868b; }"
+    "QPushButton:hover { background-color:#5c3719; }"
+    "QPushButton:pressed { background-color:#3a2110; }"
     "QPushButton:disabled {"
-    "  background-color:#e8eaed; color:#9aa0a6; border-color:#dadce0;"
-    "  font-weight:400; text-decoration:none;"
+    "  background-color:#efe4d6; color:#b08a6a; border-color:#d8c8b6;"
+    "  font-weight:400;"
     "}"
 )
 
@@ -450,12 +450,9 @@ class App(QMainWindow):
                   self.text_offy_slider, self.text_offy_spin):
             self.text_ctrl_widgets.append(w)
         f_text.layout().addLayout(vt)
-        f_text.layout().addStretch(1)   # 三列并排等高：余量沉底，避免标题被拉伸悬空
-        # 一键插入水印：挂在文本水印分组下方，宽度取分组宽度的 80%（比它短 20%）
-        self._btn_insert = _ProportionalButton("一键插入水印", f_text, ratio=0.8)
-        self._btn_insert.setStyleSheet(BTN_HL)
-        self._btn_insert.clicked.connect(self._insert)
-        f_text.layout().addWidget(self._btn_insert, 0, Qt.AlignLeft)
+        # 文本/图像两列不再纵向拉伸：Maximum = 高度以内容为准、不跟随最高的视频列
+        # （Minimum 仍会吸收多余空间，导致组标题被拉伸悬空——v1.3.3 踩过同样的坑）
+        f_text.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
 
         # ---------------- 图像水印（可启用/禁用） ----------------
         f_img = self._make_group("图像水印")
@@ -500,14 +497,21 @@ class App(QMainWindow):
                   self.img_offy_slider, self.img_offy_spin):
             self.img_ctrl_widgets.append(w)
         f_img.layout().addLayout(vi)
-        f_img.layout().addStretch(1)    # 同上：三列等高时余量沉底
-        # 一键清除水印：挂在图像水印分组下方，宽度与「一键插入水印」保持一致
-        # host2=f_text：与「一键插入水印」共用同一宽度基准，保证两者严格等宽
-        self._btn_clear = _ProportionalButton("一键清除水印", f_img, ratio=0.8,
-                                              host2=f_text)
+        f_img.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+
+        # Word 主操作按钮：独立成行、整体居中，位于三列水印下方、防去除加固上方。
+        # 宽度以「文本水印列」为基准取 80%（比水印框短 20%），两者共用同一基准故严格等宽。
+        self._btn_insert = _ProportionalButton("一键插入水印", f_text, ratio=0.8)
+        self._btn_insert.setStyleSheet(BTN_HL)
+        self._btn_insert.clicked.connect(self._insert)
+        self._btn_clear = _ProportionalButton("一键清除水印", f_text, ratio=0.8)
         self._btn_clear.setStyleSheet(BTN_HL)
         self._btn_clear.clicked.connect(self._clear)
-        f_img.layout().addWidget(self._btn_clear, 0, Qt.AlignLeft)
+        h_action = QHBoxLayout()
+        h_action.addStretch(1)                  # 左右各撑开 → 两个按钮整体居中
+        h_action.addWidget(self._btn_insert)
+        h_action.addWidget(self._btn_clear)
+        h_action.addStretch(1)
 
         # ---- 视频水印（与上方 Word 水印完全独立）----
         f_video = self._build_video_section()
@@ -515,10 +519,11 @@ class App(QMainWindow):
         # ---------------- 文本/图像/视频水印横向并排，缩短整体纵向高度 ----------------
         h_types = QHBoxLayout()
         h_types.setSpacing(8)
-        h_types.addWidget(f_text)
-        h_types.addWidget(f_img)
+        h_types.addWidget(f_text, 0, Qt.AlignTop)      # 顶对齐：列高收缩到内容后不悬在行中间
+        h_types.addWidget(f_img, 0, Qt.AlignTop)
         h_types.addWidget(f_video, 1)   # 视频列内容最多，多余宽度优先给它
-        root.addLayout(h_types)
+        root.addLayout(h_types)          # 下方紧跟主操作按钮行，再往下是防去除加固
+        root.addLayout(h_action)         # 文本水印框下面、防去除加固上面
 
         # ---------------- 防去除加固（可选）
         f_hard = self._make_group("防去除加固（让水印更难被删掉）")
@@ -797,7 +802,7 @@ class App(QMainWindow):
         self.v_run_btn.setStyleSheet(BTN_HL)          # 与主操作一致：蓝底黑字高亮
         # 取消 = 灰底黑字高亮（次操作），与主操作「开始加水印」的蓝底区分
         self.v_cancel_btn = QPushButton("取消")
-        self.v_cancel_btn.setStyleSheet(BTN_GRAY)
+        self.v_cancel_btn.setStyleSheet(BTN_BROWN)
         self.v_cancel_btn.setEnabled(False)
         self.v_cancel_btn.clicked.connect(self._v_cancel)
         hr.addWidget(self.v_run_btn); hr.addWidget(self.v_cancel_btn)
