@@ -499,19 +499,32 @@ class App(QMainWindow):
         f_img.layout().addLayout(vi)
         f_img.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
 
-        # Word 主操作按钮：独立成行、整体居中，位于三列水印下方、防去除加固上方。
-        # 宽度以「文本水印列」为基准取 80%（比水印框短 20%），两者共用同一基准故严格等宽。
+        # Word 主操作按钮：在「各自框的正下方」、仅以该框为基准水平居中——
+        #  · 一键插入水印 → 居中基准只有文本水印框，无视图像/视频列；
+        #  · 一键清除水印 → 居中基准只有图像水印框，无视文本/视频列；
+        # 实现上给每列包一个透明容器（组框 + 按钮行），按钮行左右 addStretch，
+        # 故按钮只相对自己列的组框宽度居中，与其他列毫无关系。
         self._btn_insert = _ProportionalButton("一键插入水印", f_text, ratio=0.8)
         self._btn_insert.setStyleSheet(BTN_HL)
         self._btn_insert.clicked.connect(self._insert)
-        self._btn_clear = _ProportionalButton("一键清除水印", f_text, ratio=0.8)
+        self._btn_clear = _ProportionalButton("一键清除水印", f_img, ratio=0.8)
         self._btn_clear.setStyleSheet(BTN_HL)
         self._btn_clear.clicked.connect(self._clear)
-        h_action = QHBoxLayout()
-        h_action.addStretch(1)                  # 左右各撑开 → 两个按钮整体居中
-        h_action.addWidget(self._btn_insert)
-        h_action.addWidget(self._btn_clear)
-        h_action.addStretch(1)
+
+        def _wrap_with_button(group, btn):
+            col = QWidget()
+            vl = QVBoxLayout(col)
+            vl.setContentsMargins(0, 0, 0, 0)
+            vl.addWidget(group)
+            hb = QHBoxLayout()
+            hb.addStretch(1)            # 只在「本列容器」内撑开 → 只相对本列组框居中
+            hb.addWidget(btn)
+            hb.addStretch(1)
+            vl.addLayout(hb)
+            return col
+
+        col_text = _wrap_with_button(f_text, self._btn_insert)
+        col_img = _wrap_with_button(f_img, self._btn_clear)
 
         # ---- 视频水印（与上方 Word 水印完全独立）----
         f_video = self._build_video_section()
@@ -519,11 +532,10 @@ class App(QMainWindow):
         # ---------------- 文本/图像/视频水印横向并排，缩短整体纵向高度 ----------------
         h_types = QHBoxLayout()
         h_types.setSpacing(8)
-        h_types.addWidget(f_text, 0, Qt.AlignTop)      # 顶对齐：列高收缩到内容后不悬在行中间
-        h_types.addWidget(f_img, 0, Qt.AlignTop)
+        h_types.addWidget(col_text, 0, Qt.AlignTop)     # 顶对齐：列高收缩到内容后不悬在行中间
+        h_types.addWidget(col_img, 0, Qt.AlignTop)
         h_types.addWidget(f_video, 1)   # 视频列内容最多，多余宽度优先给它
-        root.addLayout(h_types)          # 下方紧跟主操作按钮行，再往下是防去除加固
-        root.addLayout(h_action)         # 文本水印框下面、防去除加固上面
+        root.addLayout(h_types)          # 下方紧跟防去除加固
 
         # ---------------- 防去除加固（可选）
         f_hard = self._make_group("防去除加固（让水印更难被删掉）")
