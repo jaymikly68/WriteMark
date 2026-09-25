@@ -11,7 +11,7 @@ WordWatermark.exe 启动器，用户拿到的仍然只有一个 exe。
 """
 from exclude_conf import EXCLUDES
 import imageio_ffmpeg as _iff
-from PyInstaller.utils.hooks import copy_metadata
+from PyInstaller.utils.hooks import copy_metadata, collect_all
 
 # imageio_ffmpeg 自带的 ffmpeg 静态二进制（约 70MB）必须显式打进包，
 # 否则打包后视频水印功能找不到解码器。放到 imageio_ffmpeg/binaries 下，
@@ -24,16 +24,23 @@ _ff_bin = _iff.get_ffmpeg_exe()
 # copy_metadata 返回 [(src, dest), ...] 形式的列表。
 _metadata = copy_metadata('imageio') + copy_metadata('imageio_ffmpeg')
 
+# PyMuPDF（PDF 作为水印图源）是纯 Python 包 + 编译扩展的混合体，PyInstaller 的
+# 静态分析只会收二进制、漏掉它的 .py；用 collect_all 强制把整个包打进运行体。
+_pymupdf_datas, _pymupdf_bins, _pymupdf_hidden = collect_all('pymupdf')
+_datas_extra = _pymupdf_datas
+_bins_extra = _pymupdf_bins
+_hidden_extra = _pymupdf_hidden
+
 
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
-    datas=[(_ff_bin, 'imageio_ffmpeg/binaries')] + _metadata,
+    binaries=_bins_extra,
+    datas=[(_ff_bin, 'imageio_ffmpeg/binaries')] + _metadata + _datas_extra,
     # office_tweak 在 gui.py 里是「try 导入（模块缺失不该拖垮 UI）」，
     # PyInstaller 的静态分析扫不到，必须显式声明，否则「Word 秒退」按钮点了没反应。
     # video 同理（视频水印模块，依赖 imageio / imageio_ffmpeg / numpy）。
-    hiddenimports=['watermark_tool.office_tweak', 'watermark_tool.video'],
+    hiddenimports=['watermark_tool.office_tweak', 'watermark_tool.video'] + _hidden_extra,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

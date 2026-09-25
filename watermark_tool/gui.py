@@ -497,13 +497,16 @@ class App(QMainWindow):
                   self.img_offy_slider, self.img_offy_spin):
             self.img_ctrl_widgets.append(w)
         f_img.layout().addLayout(vi)
+        # 页面明示支持的图片格式（仿宋红字），让用户知晓
+        f_img.layout().addWidget(self._fmt_hint(
+            "支持格式：png、jpg、jpeg、webp、pdf（PDF 仅取首页）"))
         f_img.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
 
-        # Word 主操作按钮：在「各自框的正下方」、仅以该框为基准水平居中——
-        #  · 一键插入水印 → 居中基准只有文本水印框，无视图像/视频列；
-        #  · 一键清除水印 → 居中基准只有图像水印框，无视文本/视频列；
-        # 实现上给每列包一个透明容器（组框 + 按钮行），按钮行左右 addStretch，
-        # 故按钮只相对自己列的组框宽度居中，与其他列毫无关系。
+        # Word 主操作按钮：两个按钮「同一行、彼此平行」（同一 Y），
+        # 但各自只相对自己列的组框宽度居中，互不相干、也无视视频列。
+        # 做法：下方单独一行 h_action，前两个格子的宽度紧跟文本/图像组框，
+        # 格子内左右 addStretch 把按钮居中；最后一格 addStretch 吃下视频列的剩余宽度，
+        # 于是按钮与上方三列严格对齐、又处同一水平线。
         self._btn_insert = _ProportionalButton("一键插入水印", f_text, ratio=0.8)
         self._btn_insert.setStyleSheet(BTN_HL)
         self._btn_insert.clicked.connect(self._insert)
@@ -511,20 +514,26 @@ class App(QMainWindow):
         self._btn_clear.setStyleSheet(BTN_HL)
         self._btn_clear.clicked.connect(self._clear)
 
-        def _wrap_with_button(group, btn):
-            col = QWidget()
-            vl = QVBoxLayout(col)
-            vl.setContentsMargins(0, 0, 0, 0)
-            vl.addWidget(group)
-            hb = QHBoxLayout()
-            hb.addStretch(1)            # 只在「本列容器」内撑开 → 只相对本列组框居中
-            hb.addWidget(btn)
-            hb.addStretch(1)
-            vl.addLayout(hb)
-            return col
-
-        col_text = _wrap_with_button(f_text, self._btn_insert)
-        col_img = _wrap_with_button(f_img, self._btn_clear)
+        class _ColumnAlignedButton(QWidget):
+            """宽度紧跟宿主组框、内部把按钮水平居中的小容器。"""
+            def __init__(self, btn, host):
+                super().__init__()
+                self._host = host
+                hb = QHBoxLayout(self)
+                hb.setContentsMargins(0, 0, 0, 0)
+                hb.addStretch(1)        # 只在「本列宽度」内撑开 → 只相对本列组框居中
+                hb.addWidget(btn)
+                hb.addStretch(1)
+                host.installEventFilter(self)
+                self._sync()
+            def eventFilter(self, obj, event):
+                if event.type() == QEvent.Resize and obj is self._host:
+                    self._sync()
+                return super().eventFilter(obj, event)
+            def _sync(self):
+                w = self._host.width()
+                if w > 0:
+                    self.setFixedWidth(w)
 
         # ---- 视频水印（与上方 Word 水印完全独立）----
         f_video = self._build_video_section()
@@ -532,10 +541,17 @@ class App(QMainWindow):
         # ---------------- 文本/图像/视频水印横向并排，缩短整体纵向高度 ----------------
         h_types = QHBoxLayout()
         h_types.setSpacing(8)
-        h_types.addWidget(col_text, 0, Qt.AlignTop)     # 顶对齐：列高收缩到内容后不悬在行中间
-        h_types.addWidget(col_img, 0, Qt.AlignTop)
+        h_types.addWidget(f_text, 0, Qt.AlignTop)     # 顶对齐：列高收缩到内容后不悬在行中间
+        h_types.addWidget(f_img, 0, Qt.AlignTop)
         h_types.addWidget(f_video, 1)   # 视频列内容最多，多余宽度优先给它
-        root.addLayout(h_types)          # 下方紧跟防去除加固
+        root.addLayout(h_types)          # 下方紧跟主操作按钮行，再往下是防去除加固
+
+        h_action = QHBoxLayout()
+        h_action.setSpacing(8)
+        h_action.addWidget(_ColumnAlignedButton(self._btn_insert, f_text))
+        h_action.addWidget(_ColumnAlignedButton(self._btn_clear, f_img))
+        h_action.addStretch(1)          # 等同视频列占的剩余宽度，保证前两格与上方列对齐
+        root.addLayout(h_action)
 
         # ---------------- 防去除加固（可选）
         f_hard = self._make_group("防去除加固（让水印更难被删掉）")
@@ -658,6 +674,9 @@ class App(QMainWindow):
         g = self._make_group("视频水印（与 Word 水印独立）")
         v = g.layout()
         v.setSpacing(6)
+        # 页面明示支持的视频格式（仿宋红字），让用户知晓
+        v.addWidget(self._fmt_hint(
+            "支持视频格式：mp4、avi、mov、mkv、wmv、flv、m4v、webm 等主流视频"))
 
         if video_mod is None:
             v.addWidget(QLabel("⚠ 视频依赖 imageio / imageio-ffmpeg 未安装，视频功能不可用。"))
@@ -866,7 +885,7 @@ class App(QMainWindow):
 
     def _v_browse_img(self):
         p, _ = QFileDialog.getOpenFileName(self, "选择水印图片", "",
-                                           "图片 (*.png *.jpg *.jpeg *.bmp *.gif);;All (*.*)")
+                                           "图片 (*.png *.jpg *.jpeg *.webp *.pdf);;All (*.*)")
         if p:
             self.v_img_edit.setText(p)
 
@@ -1054,6 +1073,14 @@ class App(QMainWindow):
         if getattr(self, "_v_worker", None) and self._v_worker.isRunning():
             self._v_worker.request_stop()
             self.v_status_lbl.setText("已请求取消，正在收尾…")
+
+    @staticmethod
+    def _fmt_hint(text):
+        """页面格式说明：仿宋 + 红色，让用户一眼看清支持的格式。"""
+        lbl = QLabel(text)
+        lbl.setStyleSheet("color:#e10600; font-family:'FangSong','仿宋'; font-size:11px;")
+        lbl.setWordWrap(True)
+        return lbl
 
     def _make_group(self, title):
         """生成一个带标题的边框分组容器，返回该 QWidget（其 layout 已建好、垂直）。"""
@@ -1443,7 +1470,7 @@ class App(QMainWindow):
 
     def _browse_image(self):
         p, _ = QFileDialog.getOpenFileName(self, "选择水印图片", "",
-                                           "图片 (*.png *.jpg *.jpeg *.bmp *.gif);;All (*.*)")
+                                           "图片 (*.png *.jpg *.jpeg *.webp *.pdf);;All (*.*)")
         if p:
             self.image_path = p; self.img_edit.setText(p)
             self._schedule_preview()

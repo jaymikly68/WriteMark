@@ -17,6 +17,8 @@ def test_first_instance_wins_the_lock():
 
     app = QApplication.instance() or QApplication([])      # noqa: F841
 
+    # 清掉 OS 层可能残留的同名管道（进程已退出但管道仍注册），避免误判为“已有实例”
+    QLocalServer.removeServer(gui.SINGLE_INSTANCE_NAME)
     server, should_exit = gui._acquire_single_instance()
     try:
         assert server is not None, "首个实例应抢到单例服务"

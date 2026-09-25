@@ -288,8 +288,25 @@ def render_text_png(text: str, font_size: int, color, alpha: int,
 
 
 def prepare_image_png(path: str, alpha: int) -> Image.Image:
-    """打开用户图片并整体乘以目标透明度，返回 RGBA 图像。"""
-    img = Image.open(path).convert("RGBA")
+    """打开用户图片并整体乘以目标透明度，返回 RGBA 图像。
+
+    支持 png / jpg / jpeg / bmp / gif / webp 等常见位图；
+    若传入 .pdf，则用 PyMuPDF 渲染首页为位图（仅首页），再按透明度处理。
+    """
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".pdf":
+        import pymupdf  # PyMuPDF（已在 spec hiddenimports 中声明，保证打进包）
+        doc = pymupdf.open(path)
+        try:
+            page = doc.load_page(0)                  # 只取首页
+            # 以 200dpi 渲染，保证插入 Word 后的清晰度
+            zoom = max(1.0, 200.0 / 72.0)
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=True)
+            img = Image.frombytes("RGBA", (pix.width, pix.height), pix.samples)
+        finally:
+            doc.close()
+    else:
+        img = Image.open(path).convert("RGBA")
     a_channel = img.split()[3].point(lambda p: int(p * alpha / 255))
     img.putalpha(a_channel)
     return img
