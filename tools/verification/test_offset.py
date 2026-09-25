@@ -1,3 +1,4 @@
+import sys
 """验证水印位置偏移（上下左右独立调整）生效。"""
 import os, tempfile
 from io import BytesIO
@@ -6,6 +7,8 @@ from docx.oxml.ns import qn
 
 from PIL import Image
 
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from watermark_tool import engine_docx, preview
 
 

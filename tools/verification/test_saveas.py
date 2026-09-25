@@ -1,7 +1,10 @@
+import os
 """验证 save-as 行为：原文件不被破坏，输出副本含水印；默认输出到桌面；自动防覆盖。"""
 import sys, os, shutil
 sys.path.insert(0, os.path.dirname(__file__))
 from docx import Document
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from watermark_tool import core, engine_docx
 
 PRJ = os.path.dirname(__file__)

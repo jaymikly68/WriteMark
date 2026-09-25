@@ -6,7 +6,12 @@
 这段时间表现为“关了窗口还卡十几秒”。因此这里把依赖砍到最小，
 详见 exclude_conf.py 的说明。
 """
-from exclude_conf import EXCLUDES
+import os
+import sys
+# 项目根（本 spec 与 tools/ 同级），tools/exclude_conf.py 已在下面 import
+sys.path.insert(0, os.path.dirname(os.path.abspath(SPEC)))
+
+from tools.exclude_conf import EXCLUDES
 
 
 a = Analysis(

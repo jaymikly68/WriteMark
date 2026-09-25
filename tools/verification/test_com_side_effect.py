@@ -1,3 +1,4 @@
+import os
 """副作用对照实验：工具通过 COM 启动一次 Word（并干净收尾）之后，
 会不会让用户随后关闭 Word 变得更慢？
 
@@ -13,6 +14,8 @@
 import sys
 import time
 
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from watermark_tool import com_cleanup, word_fonts  # noqa: E402
 from test_office_exit_lag import measure  # noqa: E402
 

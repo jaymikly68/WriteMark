@@ -1,3 +1,4 @@
+import sys
 """渲染当前主窗口为 PNG，便于核对各分组块的实际位置。
 
 用法：
@@ -11,6 +12,8 @@ if os.environ.get("WM_SHOT_OFFSCREEN"):
 
 from PySide6.QtWidgets import QApplication
 
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from watermark_tool.gui import App
 
 app = QApplication.instance() or QApplication([])

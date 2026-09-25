@@ -36,9 +36,16 @@ def api(method, path, body=None, timeout=90):
                                  headers=dict(UA, **({"Content-Type": "application/json"} if body else {})))
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status, json.load(r)
+            # 204 No Content（如 DELETE asset）没有响应体，别去 json.load，
+            # 否则会抛 JSONDecodeError —— 本项目踩过。
+            body = r.read()
+            return r.status, (json.loads(body) if body else None)
     except urllib.error.HTTPError as e:
-        return e.code, e.read()[:500].decode("utf-8", "replace")
+        raw = e.read()[:500].decode("utf-8", "replace")
+        try:
+            return e.code, json.loads(raw)
+        except json.JSONDecodeError:
+            return e.code, raw
 
 
 def ensure_release(tag, commitish):

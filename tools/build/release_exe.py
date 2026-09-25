@@ -104,7 +104,8 @@ def upload(rid, path, asset_name):
 
 
 def main():
-    base = os.path.dirname(os.path.abspath(__file__))
+    # PLAN 里的路径是相对**项目根**的（本脚本位于 tools/build/）
+    base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     ok = True
     for tag, rel, asset, body in PLAN:
         path = os.path.join(base, rel)

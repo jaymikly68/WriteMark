@@ -9,7 +9,12 @@ onedir 形态没有这一步，关闭即退出（实测 0.2 秒）。
 本 spec 产出的 dist_portable/WriteMarkApp/ 会被 build_launcher.py 压缩嵌入
 WordWatermark.exe 启动器，用户拿到的仍然只有一个 exe。
 """
-from exclude_conf import EXCLUDES
+import os
+import sys
+# 项目根（本 spec 与 tools/ 同级），tools/exclude_conf.py 已在下面 import
+sys.path.insert(0, os.path.dirname(os.path.abspath(SPEC)))
+
+from tools.exclude_conf import EXCLUDES
 import imageio_ffmpeg as _iff
 from PyInstaller.utils.hooks import copy_metadata, collect_all
 

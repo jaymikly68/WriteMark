@@ -24,7 +24,8 @@ try:
 except Exception:
     pass
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# 本脚本位于 tools/，源码包 watermark_tool 在项目根，这里要把根加进 sys.path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from watermark_tool import office_tweak as ot  # noqa: E402
 
 

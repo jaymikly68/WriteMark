@@ -1,3 +1,4 @@
+import sys
 """
 验证引擎：文本 + 图像水印可同时插入、可分别/整体清除、has_watermark 识别两种标记。
 """
@@ -7,6 +8,8 @@ import tempfile
 
 from PIL import Image
 
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from watermark_tool import engine_docx, core
 
 

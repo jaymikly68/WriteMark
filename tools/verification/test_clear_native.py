@@ -1,3 +1,4 @@
+import sys
 """验证「一键清除」能去掉原本就带水印（非本工具添加）的 Word。
 
 模拟一个 Word 原生水印：页眉里有一个 behindDoc=1 的 drawing，但不带本工具标记名。
@@ -8,6 +9,8 @@ from docx import Document
 from docx.oxml.ns import qn
 from lxml import etree
 
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from watermark_tool import engine_docx
 
 # 一个最简的、衬于文字下方的 drawing（模拟 Word 原生水印）

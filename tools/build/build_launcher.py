@@ -17,7 +17,9 @@ import time
 import zipfile
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
+# 本脚本位于 tools/build/，下面所有路径（dist/ payload/ build/ watermark_tool/ main.py）
+# 都是相对**项目根**的，所以这里取根目录而不是脚本自身所在目录。
+HERE = Path(__file__).resolve().parent.parent.parent
 APP_DIR = HERE / "dist" / "WriteMarkApp"
 PAYLOAD_DIR = HERE / "payload"
 PAYLOAD_ZIP = PAYLOAD_DIR / "app_payload.zip"

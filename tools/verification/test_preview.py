@@ -10,6 +10,8 @@ import zipfile
 from docx import Document
 
 sys.path.insert(0, ".")
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from watermark_tool import engine_docx, preview
 
 MS = "test_multisec.docx"

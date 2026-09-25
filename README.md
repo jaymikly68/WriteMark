@@ -245,7 +245,7 @@ python main.py                                    :: 直接运行源码
 build.bat                                         :: 一步构建出 dist/WordWatermark.exe
 ```
 
-`build.bat` 内部会做三件事（细节见 `build_launcher.py`）：
+`build.bat` 内部会做三件事（细节见 `tools/build/build_launcher.py`）：
 
 1. 把上一次的 `dist/WriteMarkApp` **改名挪走**，再让 PyInstaller 从零构建运行体
    —— 这一步不能省：PyInstaller 重建时先要删掉旧目录，一旦这个删除被安全策略拦下，
@@ -258,25 +258,57 @@ build.bat                                         :: 一步构建出 dist/WordWa
 
 ```bat
 python -m PyInstaller WordWatermark_app.spec --noconfirm   :: 运行体 dist/WriteMarkApp/
-python build_launcher.py --skip-app                        :: 跳过第 1 步，仅重做 payload 与 exe
+python tools/build/build_launcher.py --skip-app            :: 跳过第 1 步，仅重做 payload 与 exe
 ```
 
 产物在 `dist/WordWatermark.exe`（单个文件，可拷贝到任意 Windows 机器运行；处理 `.doc` 的机器仍需安装 Word）。
 首次运行时会在 `%LOCALAPPDATA%\WriteMark\runtime\<版本>` 展开运行体并显示一次进度提示。
 
-仓库内 `test_*.py` 为自动化测试，可直接逐个运行：
+### 自动化测试
+
+`tests/` 下的用例直接 `pytest` 即可（默认只收集 `tests/`，见 `pytest.ini`）：
 
 ```bat
-python test_close_confirm.py   :: 关闭按钮三种选择（最小化 / 退出 / 取消），开不开守护都验证
-python test_close.py           :: 关闭流程不阻塞（守护、进行中的插入任务）
-python test_font_com_cleanup.py:: 读字体不留“幽灵 Word”（需本机装有 Word）
-python test_no_word_process.py  :: 全流程持续监控：一次 WINWORD 都不许出现（含监控自检）
-python test_exe_no_word.py      :: 交付版 exe 启动到退出同样不许出现 WINWORD
-python test_launcher.py        :: 交付 exe 端到端，含“关闭→进程结束”耗时
-python test_exe_verify.py      :: 校验打包产物确实包含最新代码
-python test_harden.py          :: 防去除加固各项
-python test_watchdog_verify.py :: 后台守护三种场景
+pytest                          :: 全部用例（`tests/` 下，当前 45 项）
+pytest tests/unit               :: 只跑单元用例
 ```
+
+`tools/verification/` 里的 `test_*.py` **不是 pytest 用例**，而是可重复执行的验证脚本
+（需要真实 exe、会占用托盘、耗时较长），要显式指名运行：
+
+```bat
+python tools/verification/test_close_confirm.py   :: 关闭按钮三种选择（最小化 / 退出 / 取消）
+python tools/verification/test_font_com_cleanup.py:: 读字体不留“幽灵 Word”（需本机装有 Word）
+python tools/verification/test_no_word_process.py  :: 全流程持续监控：一次 WINWORD 都不许出现
+python tools/verification/test_exe_no_word.py      :: 交付版 exe 启动到退出同样不许出现 WINWORD
+python tools/verification/test_launcher.py        :: 交付 exe 端到端，含“关闭→进程结束”耗时
+python tools/verification/test_exe_verify.py      :: 校验打包产物确实包含最新代码
+python tools/verification/test_watchdog_verify.py :: 后台守护三种场景
+```
+
+### 仓库结构
+
+```
+.
+├── watermark_tool/       源码包（PyInstaller 就打包这个 + main.py）
+├── main.py  launcher.py  PyInstaller 入口 / 单文件启动器（构建期追加 payload）
+├── tests/                自动化测试（pytest）
+│   ├── unit/             单元：水印算法、字体引擎、防去除加固
+│   ├── integration/      集成：跨模块/跨进程（如单实例互斥）
+│   ├── gui/              GUI 行为：关闭流程、关闭确认
+│   └── e2e/              交付物（exe）端到端；当前脚本在 tools/verification/，见该目录 README
+├── tools/                不便归入源码的日常工具
+│   ├── build/            构建（build_launcher.py / release_exe.py）
+│   ├── release/          发版：release_upload.py + release_note.md
+│   ├── diagnostics/      布局与几何诊断（diag_layout_geo.py 等）
+│   └── verification/     端到端验证脚本（无 pytest 用例，需真实 exe）
+├── office_fix/           给最终用户用的「一键修复 / 一键还原」脚本
+├── build.bat  *.spec     PyInstaller 配置与一键构建
+└── conftest.py  pytest.ini
+```
+
+> `watermark_tool/` 之所以留在根目录而不是收进 `src/`，是因为 PyInstaller 的 spec 与
+> 现有打包路径都按这个结构写；把测试与工具脚本分开后，源码本身的构建链路不用动。
 
 > 自动化测试可用 `WM_CLOSE_CHOICE=minimize|quit|cancel` 环境变量直接指定关闭时的选择，
 > 无需去点模态对话框。
@@ -290,6 +322,48 @@ python test_watchdog_verify.py :: 后台守护三种场景
     该属性是 OOXML 标准属性，实测 **Word 打开并另存后依然保留**，因此识别与一键清除不受影响。
 - **清除**时会同时移除本工具标记的水印，以及任何"衬于文字下方"的图形（即 Word 原生水印），页眉与页脚都会扫描。
 - 不会动正文、图片、表格等其它内容。
+
+## 版本 ↔ 源码 ↔ exe 对照
+
+每个正式版本都有对应的 git tag，可直接 `git checkout <tag>` 拿到那一版源码：
+
+```bat
+git checkout v1.4.4        :: 回到 v1.4.4 的源码
+git log v1.4.3..v1.4.4     :: 看这一版之间改了什么
+```
+
+关于 exe：
+
+- **只有当前版本（v1.5.0）的 exe 挂在 Release 上**，点这里下载
+  [WordWatermark.exe](https://github.com/jaymikly68/WriteMark/releases/download/v1.5.0/WordWatermark.exe)。
+- 其它历史 exe 没有留档。要某一版的 exe，请用那一版源码自己打包：`git checkout <tag>` 后跑 `build.bat`。
+- exe 每次构建都会因内嵌时间戳而得到不同的 MD5，下表不记录校验值，以当次构建为准。
+
+| 版本 | Tag | 提交 | 该版本做了什么 |
+| --- | --- | --- | --- |
+| v1.5.0 | `v1.5.0` | `2bb57a7` | 后台守护框移入视频列 + 多语言界面 Polyglot UI（8 语言） |
+| v1.4.4 | `v1.4.4` | `609394f` | 视频框底边与预览框齐平；移出框内空白进度条，多余空间给预览帧 |
+| v1.4.3 | `v1.4.3` | `ddf8b5f` | 「Word 秒退」并入文本水印列，与「防去除加固」顶底齐平 |
+| v1.4.2 | `v1.4.2` | `fef8833` | Word 输入/输出行收窄对齐；文本/图像列底边平行；视频行上移 |
+| v1.4.1 | `v1.4.1` | `1d970f2` | 按参考图重排：加固贴图像列下方、水印预览通栏、视频独立右列 |
+| v1.4.0 | `v1.4.0` | `814882c` | 修视频导出时长被压成 1 秒；加固与水印预览并排 |
+| v1.3.9 | `v1.3.9` | `c292640` | 视频水印预览（改参即时重绘）；Word/视频自定义水印位置（九宫格+X/Y+拖拽） |
+| v1.3.8 | `v1.3.8` | `2ad65c2` | 主按钮平行；图片/视频格式支持与仿宋红字提示（含 PDF） |
+| v1.3.7 | `v1.3.7` | `d5822b0` | 主按钮各自以本列组框为基准居中 |
+| v1.3.6 | `v1.3.6` | `bfb293e` | 主按钮独立居中行；文本/图像列收缩；取消改深褐底红字 |
+| v1.3.5 | `v1.3.5` | `48da304` | Word 主按钮分挂两列底部；视频取消改灰底高亮 |
+| v1.3.4 | `v1.3.4` | `12a4c09` | Word 主按钮并入 Word 区域；只允许一个后台实例 |
+| v1.3.3 | `v1.3.3` | `e56ea65` | 视频水印区块挪到 Word/图像水印右侧，三列并排 |
+| v1.3.2 | `v1.3.2` | `9090e80` | 分辨率补回 2K/4K；帧率锁定 6 档；支持自定义帧率 |
+| v1.3.1 | `v1.3.1` | `cddde9d` | 修导出分辨率只剩 720P；修帧率下拉空白 |
+| v1.3.0 | `v1.3.0` | `dbd7322` | 图片水印超采样不再糊；导出分辨率/帧率/画质可自定义 |
+| v1.1.10 | `v1.1.10` | `4a9d97d` | 修「开始加水印」点了没反应 + 蓝底黑字高亮；修进度溢出 |
+| v1.1.9 | `v1.1.9` | `1aeb842` | 修视频页提示「视频依赖未安装」 |
+| v1.1.8 | `v1.1.8` | `9e3c4c5` | 视频水印（独立模块、逐帧+滚动）；Word 一键去除弹窗选型 |
+| v1.1.7 | `v1.1.7` | `ec19920` | 点关闭=关闭页面不退出后台；任务完成弹窗 |
+| v1.1.6 | `v1.1.6` | `bfdb4bb` | 主按钮蓝底黑字高亮；默认保存名改 `<原名>WaterMark.docx` |
+
+> 另有几个提交属于过程性改动（播放方式、运行体换装重试等），没有独立版本号，因此不打 tag。
 
 ## 版本历史
 

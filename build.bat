@@ -15,11 +15,11 @@ REM  注意：build_launcher.py 会先把上一次的 dist/WriteMarkApp 改名�
 REM  这一步不能省 —— PyInstaller 的"删除旧目录"一旦被安全策略拦下，它不会报错，
 REM  产物却会静默停留在旧版本（本项目真实踩过这个坑）。
 REM ============================================================
-python build_launcher.py
+python tools\build\build_launcher.py
 if errorlevel 1 goto :fail
 echo.
 echo 产物：dist\WordWatermark.exe
-echo 验证：python test_launcher.py --clean   （含首次/二次启动与关闭耗时）
+echo 验证：python tools\verification\test_launcher.py --clean   （含首次/二次启动与关闭耗时）
 pause
 exit /b 0
 

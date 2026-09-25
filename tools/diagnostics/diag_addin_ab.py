@@ -12,6 +12,8 @@ import time
 import winreg
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from watermark_tool import office_tweak as ot  # noqa: E402
 
 HK = winreg.HKEY_CURRENT_USER

@@ -1,9 +1,12 @@
+import sys
 """诊断：Word / 视频水印的「自定义位置」是否生效（offscreen 渲染，不弹窗）。"""
 import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from watermark_tool.gui import App
 
 app = QApplication.instance() or QApplication([])

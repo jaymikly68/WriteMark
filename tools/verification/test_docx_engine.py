@@ -1,6 +1,9 @@
+import sys
 import os, sys
 from docx import Document
 sys.path.insert(0, os.path.dirname(__file__))
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from watermark_tool import engine_docx as eng
 
 OUT = os.path.join(os.path.dirname(__file__), "sample.docx")

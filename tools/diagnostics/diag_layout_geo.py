@@ -1,3 +1,4 @@
+import sys
 """几何校验（v1.4.4 版式）：
 
     左侧 Word 区（竖排）                  右侧视频列
@@ -29,6 +30,8 @@ if not os.environ.get("WM_GEO_REAL"):
 
 from PySide6.QtWidgets import QApplication, QLabel
 
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from watermark_tool.gui import App
 
 app = QApplication.instance() or QApplication([])
