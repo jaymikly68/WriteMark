@@ -247,19 +247,36 @@ def test_gui_export_spec_defaults_and_limits():
     disp_w, disp_h = _screen_geometry()
     rate = _screen_refresh_rate()
 
+    # 分辨率：480P/720P/1080P 是基础档，必须始终可选（默认 1080P）；
+    # 2K/4K 这类高阶档才按显示器上限裁剪。
     assert w.v_res_items, "至少应提供一个可选分辨率"
+    assert any(lb.startswith("1080P") for lb, _a, _b in w.v_res_items), \
+        "1080P 是默认档，必须始终提供"
+    BASE_H = {480, 720, 1080}
     for lb, iw, ih in w.v_res_items:
-        assert iw <= disp_w and ih <= disp_h, \
-            f"选项 {lb} 超过显示器上限 {disp_w}x{disp_h}"
+        if ih not in BASE_H:
+            assert iw <= disp_w and ih <= disp_h, \
+                f"高阶选项 {lb} 超过显示器上限 {disp_w}x{disp_h}"
     idx1080 = [i for i, (lb, _a, _b) in enumerate(w.v_res_items) if lb.startswith("1080P")]
-    if idx1080:
-        assert w.v_res_combo.currentIndex() == idx1080[0], "默认导出分辨率应为 1080P"
+    assert w.v_res_combo.currentIndex() == idx1080[0], "默认导出分辨率应为 1080P"
+    assert w.v_res_combo.count() == len(w.v_res_items), "分辨率下拉条目数应与数据一致"
+    for i in range(w.v_res_combo.count()):
+        assert w.v_res_combo.itemText(i).strip(), f"分辨率下拉第 {i} 项为空"
     assert w._v_out_spec() == w.v_res_items[w.v_res_combo.currentIndex()][1:], \
         "解析出的分辨率与界面选项不一致"
 
-    for f in w.v_fps_items:
-        assert f <= rate, f"帧率选项 {f} 超过屏幕刷新率 {rate}"
-    assert w._v_out_fps() == max(w.v_fps_items), "默认帧率应跟随屏幕刷新率"
+    # 帧率：条目必须是 (label, fps) 二元组，且下拉不能出现空白项
+    # （v1.3.0 曾把 int 直接塞进 addItems，导致整个下拉显示为空）。
+    assert w.v_fps_items and all(isinstance(t, tuple) and len(t) == 2
+                                 for t in w.v_fps_items), \
+        "帧率条目应为 (label, fps) 二元组"
+    for lb, f in w.v_fps_items:
+        assert f <= rate, f"帧率选项 {lb} 超过屏幕刷新率 {rate}"
+    assert w.v_fps_combo.count() == len(w.v_fps_items), "帧率下拉条目数应与数据一致"
+    for i in range(w.v_fps_combo.count()):
+        assert w.v_fps_combo.itemText(i).strip(), \
+            f"帧率下拉第 {i} 项为空（int 直接 addItems 会显示空白）"
+    assert w._v_out_fps() == max(v for _, v in w.v_fps_items), "默认帧率应跟随屏幕刷新率"
     assert w._v_out_crf() == video.CRF_PRESETS["标准"], "默认画质应为标准"
 
     ow, oh = w._v_out_spec()

@@ -88,27 +88,35 @@ def _resolve_motion(combo, global_motion: str) -> str:
 # 导出能力上限：一律不超过用户当前显示器的分辨率与刷新率
 # ---------------------------------------------------------------------------
 def _screen_geometry() -> tuple[int, int]:
-    """当前主屏幕的可显示分辨率 (w, h)；取不到时用 1920x1080 兜底。"""
+    """当前主屏幕的分辨率 (w, h)；取不到时用 1920x1080 兜底。
+
+    必须用 screenGeometry()（不含任务栏扣除），不能用 availableGeometry()：
+    后者在 Windows 上会把任务栏高度扣掉（例如 1080P 屏只剩 1040），
+    导致 1080P 这一档被"不超过显示器"的过滤条件误杀。
+    """
     try:
         from PySide6.QtGui import QGuiApplication
         scr = QGuiApplication.primaryScreen() or QGuiApplication.screens()[0]
-        rect = scr.availableGeometry()
+        rect = scr.geometry()
         return rect.width(), rect.height()
     except Exception:
         return 1920, 1080
 
 
 def _v_resolution_items() -> list[tuple[str, int, int]]:
-    """可选导出分辨率，按显示器高度上限裁剪；默认档为 1080P。"""
+    """可选导出分辨率；480P/720P/1080P 为基础档始终提供，2K/4K 按显示器上限裁剪。
+
+    基础三档不依赖显示器大小（视频导出与桌面显示是两回事，1080P 是
+    通用兼容档），这样才能保证"默认 1080P"永远成立；高阶档再严格
+    按显示器能力给，避免小屏导 4K 的浪费。
+    """
     disp_w, disp_h = _screen_geometry()
-    presets = [(f"480P（{854}×{480}）", 854, 480),
-               (f"720P（{1280}×{720}）", 1280, 720),
-               (f"1080P（{1920}×{1080}）", 1920, 1080),
-               (f"2K（{2560}×{1440}）", 2560, 1440),
-               (f"4K（{3840}×{2160}）", 3840, 2160)]
-    items = [(lb, w, h) for lb, w, h in presets if w <= disp_w and h <= disp_h]
-    if not items:                      # 显示器比 480P 还小（极端情况）也给出一个
-        items = [(f"{disp_w}×{disp_h}", disp_w, disp_h)]
+    base = [(f"480P（{854}×{480}）", 854, 480),
+            (f"720P（{1280}×{720}）", 1280, 720),
+            (f"1080P（{1920}×{1080}）", 1920, 1080)]
+    high = [(f"2K（{2560}×{1440}）", 2560, 1440),
+            (f"4K（{3840}×{2160}）", 3840, 2160)]
+    items = list(base) + [p for p in high if p[1] <= disp_w and p[2] <= disp_h]
     return items
 
 
@@ -123,14 +131,21 @@ def _screen_refresh_rate() -> int:
     return rate if rate > 0 else 60
 
 
-def _v_fps_items() -> list[int]:
-    """可选帧率，上限为用户屏幕刷新率；默认取屏幕上限对应的那一档。"""
+def _v_fps_items() -> list[tuple[str, int]]:
+    """可选帧率 (label, fps)；上限为用户屏幕刷新率，默认取最接近屏幕的那一档。
+
+    必须返回 (label, value) 二元组：QComboBox.addItems 只认字符串，
+    直接塞 int 会得到一排空白下拉项（v1.3.0 的 bug）。
+    """
     rate = _screen_refresh_rate()
-    cands = [24, 25, 30, 48, 50, 60, 75, 90, 100, 120, 144]
-    items = [f for f in cands if f <= rate]
-    if not items:                      # 刷新率低于 24 的罕见情况，直接给屏幕值
-        items = [max(8, rate)]
-    return items
+    cands = [24, 25, 30, 48, 50, 60, 75, 90, 100, 120, 144, 165, 240, 360]
+    vals = [f for f in cands if f <= rate]
+    if not vals:                       # 刷新率低于 24 的罕见情况，直接给屏幕值
+        vals = [max(8, rate)]
+    elif rate not in vals:             # 高刷屏（如 155Hz）补上真实档位
+        vals.append(rate)
+        vals.sort()
+    return [(f"{f} fps", f) for f in vals]
 
 
 class Worker(QThread):
@@ -697,8 +712,8 @@ class App(QMainWindow):
         hs.addWidget(self.v_res_combo, 0)
         hs.addWidget(QLabel("帧率:"))
         self.v_fps_combo = QComboBox()
-        self.v_fps_items = _v_fps_items()
-        self.v_fps_combo.addItems([t for t in self.v_fps_items])
+        self.v_fps_items = _v_fps_items()                 # [(label, fps), ...]
+        self.v_fps_combo.addItems([lb for lb, _f in self.v_fps_items])
         if self.v_fps_items:
             self.v_fps_combo.setCurrentIndex(len(self.v_fps_items) - 1)  # 默认跟随屏幕
         hs.addWidget(self.v_fps_combo, 0)
@@ -777,7 +792,9 @@ class App(QMainWindow):
 
     def _v_out_fps(self):
         idx = self.v_fps_combo.currentIndex()
-        return self.v_fps_items[idx] if (0 <= idx < len(self.v_fps_items)) else 60
+        if 0 <= idx < len(self.v_fps_items):
+            return self.v_fps_items[idx][1]
+        return 60
 
     def _v_out_crf(self):
         return video_mod.CRF_PRESETS.get(self.v_crf_combo.currentText(), 18)
