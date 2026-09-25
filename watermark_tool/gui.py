@@ -394,7 +394,11 @@ class App(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("一键水印工具（Word / 视频）")
-        self.resize(1200, 720)   # 三列并排后需要更宽，避免视频列文字被截断
+        # 默认尺寸按屏幕自适应：内容最小宽度约 1.34k（三列并排 + 视频列控件），
+        # 旧默认 1200 会顶出横向滚动条，看起来像“界面少了一列/位置错乱”。
+        _sw, _sh = _screen_geometry()
+        self.resize(max(1200, min(1400, int(_sw * 0.94))),
+                    max(720, min(920, int(_sh * 0.90))))
 
         self.file_path = ""
         self.text_enabled = True     # 文本水印默认启用
@@ -718,13 +722,13 @@ class App(QMainWindow):
             "Word/WPS 的“删除水印”按钮和多数去水印脚本都是按名称/结构匹配水印图形的，\n"
             "这样它们就找不到、删不干净。对肉眼外观没有任何影响。")
         vh.addWidget(self.redundant_chk)
-        root.addWidget(f_hard)
 
         # 预览
         f_prev = self._make_group("水印预览（示意，脱离 Word 直接查看）")
         vp = f_prev.layout()
         self.preview_label = _DragLabel(); self.preview_label.setAlignment(Qt.AlignCenter)
-        self.preview_label.setMinimumSize(230, 326)
+        # 与「防去除加固」并排后宽度充裕，预览图跟着放大（A4 比例约 1:1.414）
+        self.preview_label.setMinimumSize(280, 400)
         self.preview_label.setStyleSheet("border:1px solid #bbb; background:#fafafa;")
         self.preview_label.setText("预览不可用")
         self.preview_label.dragged.connect(self._on_preview_drag)
@@ -737,7 +741,18 @@ class App(QMainWindow):
         bp = QPushButton("预览水印"); bp.clicked.connect(self._render_preview); hprev.addWidget(bp)
         bps = QPushButton("保存预览图"); bps.clicked.connect(self._save_preview); hprev.addWidget(bps)
         vp.addLayout(hprev)
-        root.addWidget(f_prev)
+
+        # ---------------- 防去除加固 + 水印预览：三列下方并排一行 ----------------
+        # 左「防去除加固」（窄）、右「水印预览」（宽，预览图更大更好看点）。
+        # 两块都取 Maximum 高度并顶对齐，避免被行高拉伸出空白
+        # （历史上 QSizePolicy.Minimum 会吸收多余空间、把组标题顶到悬空）。
+        f_hard.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        f_prev.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        h_lower = QHBoxLayout()
+        h_lower.setSpacing(8)
+        h_lower.addWidget(f_hard, 2, Qt.AlignTop)
+        h_lower.addWidget(f_prev, 3, Qt.AlignTop)
+        root.addLayout(h_lower)
 
         # 守护
         f_watch = self._make_group("后台守护（水印被删自动补回）")
@@ -912,37 +927,38 @@ class App(QMainWindow):
         # X/Y 为「水印左上角相对画面」的百分比（0,0=左上角；100,100=右下角外），
         # 选预设会把 X/Y 回填，手改 X/Y 或在预览帧上拖拽会自动切到「自定义」。
         self._v_pos_applying = False
-        hp = QHBoxLayout()
-        hp.addWidget(QLabel("文字位置:"))
+        # 拆成两行（文字 / 图片各一行），单行控件更少 → 视频列最小宽度明显变窄，
+        # 否则三列并排时整页最小宽度会超过窗口、被迫横向滚动（看起来像“少了一列”）。
+        hp1 = QHBoxLayout()
         self.v_text_pos_combo = QComboBox()
         self.v_text_pos_combo.addItems(_V_POSITIONS_KEYS)
         self.v_text_pos_combo.setCurrentText("右下")
         self.v_text_pos_combo.setToolTip("预设锚点；选「自定义」后以右侧 X/Y 百分比为准")
-        hp.addWidget(self.v_text_pos_combo)
-        hp.addWidget(QLabel("X%:"))
         self.v_text_x_spin = self._v_make_xy_spin(82)
-        hp.addWidget(self.v_text_x_spin)
-        hp.addWidget(QLabel("Y%:"))
         self.v_text_y_spin = self._v_make_xy_spin(85)
-        hp.addWidget(self.v_text_y_spin)
-        hp.addSpacing(10)
-        hp.addWidget(QLabel("图片位置:"))
+        hp1.addWidget(QLabel("文字位置:"))
+        hp1.addWidget(self.v_text_pos_combo)
+        hp1.addWidget(QLabel("X%:")); hp1.addWidget(self.v_text_x_spin)
+        hp1.addWidget(QLabel("Y%:")); hp1.addWidget(self.v_text_y_spin)
+        hp1.addStretch(1)
+        v.addLayout(hp1)
+
+        hp2 = QHBoxLayout()
         self.v_img_pos_combo = QComboBox()
         self.v_img_pos_combo.addItems(_V_POSITIONS_KEYS)
         self.v_img_pos_combo.setCurrentText("左下")   # 与文字错位，默认不打架
         self.v_img_pos_combo.setToolTip("预设锚点；选「自定义」后以右侧 X/Y 百分比为准")
-        hp.addWidget(self.v_img_pos_combo)
-        hp.addWidget(QLabel("X%:"))
         self.v_img_x_spin = self._v_make_xy_spin(8)
-        hp.addWidget(self.v_img_x_spin)
-        hp.addWidget(QLabel("Y%:"))
         self.v_img_y_spin = self._v_make_xy_spin(85)
-        hp.addWidget(self.v_img_y_spin)
-        hp.addSpacing(10)
-        hp.addWidget(QLabel("滚动速度:"))
-        hp.addWidget(self.v_speed_spin)
-        hp.addStretch(1)
-        v.addLayout(hp)
+        hp2.addWidget(QLabel("图片位置:"))
+        hp2.addWidget(self.v_img_pos_combo)
+        hp2.addWidget(QLabel("X%:")); hp2.addWidget(self.v_img_x_spin)
+        hp2.addWidget(QLabel("Y%:")); hp2.addWidget(self.v_img_y_spin)
+        hp2.addSpacing(10)
+        hp2.addWidget(QLabel("滚动速度:"))
+        hp2.addWidget(self.v_speed_spin)
+        hp2.addStretch(1)
+        v.addLayout(hp2)
         # 预设 ↔ X/Y 双向联动
         self.v_text_pos_combo.currentTextChanged.connect(self._v_on_text_preset)
         self.v_img_pos_combo.currentTextChanged.connect(self._v_on_img_preset)
@@ -1077,6 +1093,8 @@ class App(QMainWindow):
             "因此可以做出「文字滚动 + 图片固定」等任意搭配。"
             "导出分辨率默认 1080P，可选至 4K；帧率可选 60/120/144/165/240/300 Hz，"
             "默认取不超过你屏幕刷新率的那一档，非标准帧率可在右侧输入框直接填写（1~300）。"
+            "导出帧率与原视频不同时会自动按时间轴补帧/丢帧，成片时长与原视频一致"
+            "（帧率越高文件越大、处理越慢）。"
             "图片水印采用超采样渲染，放大导出时依然锐利。逐帧处理较长视频较慢属正常，原音轨会自动保留。")
         self.v_status_lbl.setWordWrap(True)
         v.addWidget(self.v_status_lbl)

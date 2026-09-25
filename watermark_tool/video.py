@@ -293,37 +293,53 @@ def add_video_watermark(src: str, output: str, opts: dict,
                        "-pix_fmt", "yuv420p"],
     )
 
-    frame_idx = 0
+    # ---- 帧率重采样：保证「时长不变」 ----
+    # writer 用的 fps 是用户选的导出帧率，可能远高于（或低于）源视频帧率。若把源帧
+    # 逐张写进按 out_fps 计时的容器里，时长会被压成 src_fps/out_fps 倍——历史上就表现为
+    # “不管多长的视频，导出/预览都只剩 1 秒”（源 30fps、导出 300fps 时正好缩到 1/10）。
+    # 因此这里按时间轴做最近邻重采样：源帧覆盖时间区间 [t, t+1/src_fps)，
+    # 输出帧 k 的显示时刻 (k+0.5)/out_fps 落在该区间内就写这张源帧
+    # （帧率更高 → 复制补帧；帧率更低 → 丢帧），时长与源视频严格一致。
+    src_fps = fps if fps > 0 else 25.0
+    frame_idx = 0        # 已读入的源帧数（用于进度）
+    out_idx = 0          # 已写入的输出帧数
     try:
         for frame in reader:
             if stop_check is not None and stop_check():
                 break
-            # frame 多为 RGB uint8；统一转 RGBA 并按导出分辨率放大/缩小
-            img = Image.fromarray(np.asarray(frame)).convert("RGBA")
-            if need_resize:
-                img = img.resize((W, H), Image.LANCZOS)
-            t_sec = frame_idx / out_fps
-            painted = set()   # “固定+滚动”下避免同一图层在完全相同坐标被叠加两次
-            for spec in layers:
-                layer = spec["img"]
-                lw, lh = layer.size
-                pos = spec.get("position")
-                for motion in spec.get("motions") or motions:
-                    if motion == "scroll":
-                        x, y = _scroll_pos(lw, lh, W, H, pos, t_sec, scroll_speed)
-                    else:
-                        x, y = _fixed_pos(lw, lh, W, H, pos)
-                    if (x, y) in painted:
-                        continue
-                    painted.add((x, y))
-                    img.alpha_composite(layer, (x, y))
-            writer.append_data(np.asarray(img.convert("RGB")))
-            frame_idx += 1
-            # 短片预览：只处理前 max_seconds 秒，到时长即停（用于“播放短片预览”）
-            if max_seconds and frame_idx / out_fps >= max_seconds:
+            t_start = frame_idx / src_fps
+            # 短片预览：按「源视频的时间」截断，而不是按输出帧数
+            if max_seconds and t_start >= max_seconds:
                 break
+            frame_idx += 1
+            # frame 多为 RGB uint8；统一转 RGBA 并按导出分辨率放大/缩小
+            base = Image.fromarray(np.asarray(frame)).convert("RGBA")
+            if need_resize:
+                base = base.resize((W, H), Image.LANCZOS)
+            t_end = frame_idx / src_fps      # 本帧覆盖到下一源帧开始
+            while (out_idx + 0.5) / out_fps < t_end:
+                t_sec = out_idx / out_fps    # 水印滚动按输出时间轴走
+                img = base.copy()            # 同一源帧可能对应多个输出帧，需各自上色
+                painted = set()   # “固定+滚动”下避免同一图层在完全相同坐标被叠加两次
+                for spec in layers:
+                    layer = spec["img"]
+                    lw, lh = layer.size
+                    pos = spec.get("position")
+                    for motion in spec.get("motions") or motions:
+                        if motion == "scroll":
+                            x, y = _scroll_pos(lw, lh, W, H, pos, t_sec, scroll_speed)
+                        else:
+                            x, y = _fixed_pos(lw, lh, W, H, pos)
+                        if (x, y) in painted:
+                            continue
+                        painted.add((x, y))
+                        img.alpha_composite(layer, (x, y))
+                writer.append_data(np.asarray(img.convert("RGB")))
+                out_idx += 1
+                if max_seconds and out_idx / out_fps >= max_seconds:
+                    break
             if progress_fn is not None and total:
-                progress_fn(frame_idx, total)
+                progress_fn(min(frame_idx, total), total)
     finally:
         try:
             writer.close()
@@ -334,7 +350,7 @@ def add_video_watermark(src: str, output: str, opts: dict,
         except Exception:
             pass
 
-    frames_done = frame_idx
+    frames_done = out_idx
     if frames_done == 0:
         if os.path.exists(tmp_vid):
             os.remove(tmp_vid)

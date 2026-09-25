@@ -170,6 +170,77 @@ def test_video_export_resolution_and_fps():
     print("video 导出分辨率/帧率生效 PASS")
 
 
+def _video_duration(path):
+    """读视频时长（秒）：优先用容器 duration，缺失时用 帧数/帧率 推算。"""
+    r = iio.get_reader(path, "ffmpeg")
+    meta = r.get_meta_data()
+    try:
+        dur = float(meta.get("duration") or 0)
+    except Exception:
+        dur = 0.0
+    fps = float(meta.get("fps") or 0) or 0.0
+    n = meta.get("nframes", 0)
+    try:
+        n = int(float(n))
+    except Exception:
+        n = 0
+    if n <= 0 or n > 10_000_000:
+        try:
+            n = int(r.count_frames())
+        except Exception:
+            n = 0
+    r.close()
+    if dur <= 0 and n > 0 and fps > 0:
+        dur = n / fps
+    return dur
+
+
+def test_video_duration_preserved_across_fps():
+    """导出帧率 ≠ 源帧率时，时长必须与源视频一致。
+
+    历史 bug（用户报「预览和导出都只有 1 秒」）：把源帧逐张写进按 out_fps 计时的容器，
+    时长被压成 src_fps/out_fps 倍——源 24fps、导出 60fps 时 2.4s 只剩 0.96s，看着就是 1 秒。
+    正确做法是按时间轴重采样（补帧/丢帧），时长恒定。
+    """
+    from watermark_tool import video
+
+    d = tempfile.mkdtemp()
+    src = os.path.join(d, "src.mp4")
+    _make_video(src, W=160, H=120, N=48)          # 24fps × 48 帧 = 2.0 秒
+    src_dur = _video_duration(src)
+    assert abs(src_dur - 2.0) < 0.3, f"测试源视频应≈2 秒，实际 {src_dur}"
+
+    for fps in (24, 60, 120):
+        out = os.path.join(d, f"out_{fps}.mp4")
+        res = video.add_video_watermark(src, out, {
+            "kinds": ["text"], "motion": "fixed",
+            "fps": fps, "crf": 18,
+            "text": {"text": "机密", "color": (255, 0, 0), "alpha": 220,
+                     "size_frac": 0.12, "position": (0.4, 0.4)},
+        })
+        assert res["ok"], res
+        dur = _video_duration(out)
+        assert abs(dur - src_dur) <= 0.35, (
+            f"导出 {fps}fps 时时长应保持≈{src_dur:.2f}s，实际 {dur:.2f}s（时长被压缩）")
+        # 帧数应≈时长×导出帧率（证明真的按目标帧率补/丢帧）
+        n_expected = src_dur * fps
+        assert abs(res["frames"] - n_expected) <= max(3, n_expected * 0.12), (
+            f"{fps}fps 输出帧数应≈{n_expected:.0f}，实际 {res['frames']}")
+        print(f"[帧率对齐] 源 {src_dur:.2f}s → 导出 {fps}fps: 时长 {dur:.2f}s、"
+              f"帧数 {res['frames']}")
+
+    # 短片预览：按时长截断（不是按帧数），3 秒源应得 3 秒
+    out3 = os.path.join(d, "preview3.mp4")
+    res3 = video.add_video_watermark(src, out3, {
+        "kinds": ["text"], "motion": "fixed", "fps": 60,
+        "text": {"text": "X", "color": (255, 0, 0), "alpha": 200, "size_frac": 0.2},
+    }, max_seconds=1.0)
+    assert res3["ok"], res3
+    dur3 = _video_duration(out3)
+    assert abs(dur3 - 1.0) <= 0.35, f"max_seconds=1 时应≈1s，实际 {dur3:.2f}s"
+    print("video 时长跨帧率保持一致 PASS")
+
+
 def test_video_crf_passthrough(monkeypatch):
     """清晰度参数：不能再用 imageio 默认的 crf≈25，必须把 crf 传进 ffmpeg。"""
     from watermark_tool import video
