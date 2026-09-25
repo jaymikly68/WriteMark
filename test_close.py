@@ -34,8 +34,7 @@ def test_watchdog_close_no_block(app):
     time.sleep(0.2)  # 让守护跑一轮
 
     # 关闭按钮现在会弹“最小化到后台 / 退出程序 / 取消”询问（模态框），
-    # 自动化脚本里必须显式表达“要退出”，否则会一直等用户输入。
-    w._confirm_close = False
+    # 自动化脚本里必须显式表达“要退出”，否则默认是隐藏到后台。
     w._quitting = True
     t0 = time.time()
     w.closeEvent(QCloseEvent())
@@ -63,6 +62,7 @@ def test_worker_terminate_on_close(app):
     time.sleep(0.2)
 
     t0 = time.time()
+    w._quitting = True          # 测的是“真正退出”路径下的线程强杀（点关闭默认是隐藏到后台）
     w.closeEvent(QCloseEvent())
     dt = time.time() - t0
     print(f"[2] closeEvent during running worker = {dt*1000:.1f} ms (应约 2000~2600ms, 非 6000ms)")

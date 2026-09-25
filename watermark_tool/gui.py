@@ -140,7 +140,6 @@ class App(QMainWindow):
         self._last_inserted = None     # 上次插入实际写入的水印份数（守护按份数校验）
         self.tray = None
         self._quitting = False
-        self._confirm_close = True   # 点关闭按钮时是否弹“最小化/退出”询问（自动化脚本可关闭）
         self._tray_tried = 0         # 托盘初始化尝试次数
         self._tray_reason = ""       # 托盘初始化失败原因
 
@@ -976,61 +975,6 @@ class App(QMainWindow):
         self.close()
         QApplication.quit()
 
-    def _ask_close_choice(self):
-        """点击标题栏关闭按钮（或 Alt+F4）时弹出询问——无论守护是否开启。
-
-        返回 'minimize'（窗口最小化到后台，进程保留）/ 'quit'（退出程序）/ 'cancel'（取消）。
-
-        自动化脚本可用环境变量 WM_CLOSE_CHOICE=minimize|quit|cancel 直接指定，
-        这样测试无需去点模态框按钮。
-        """
-        forced = os.environ.get("WM_CLOSE_CHOICE", "").strip().lower()
-        if forced in ("minimize", "quit", "cancel"):
-            return forced
-
-        has_tray = self.tray is not None
-        watching = self.wd is not None
-        box = QMessageBox(self)
-        box.setWindowTitle("关闭窗口")
-        box.setIcon(QMessageBox.Question)
-        box.setText("要关闭这个窗口，还是直接退出程序？")
-        if watching:
-            if has_tray:
-                box.setInformativeText(
-                    "后台保护正在运行。\n\n"
-                    "【最小化到后台】窗口隐藏到系统托盘，守护继续运行，水印被删会自动补回；\n"
-                    "单击/双击托盘图标可重新打开窗口，右键托盘可停止守护或退出程序。\n\n"
-                    "【退出程序】停止后台保护并完全退出进程。")
-            else:
-                box.setInformativeText(
-                    f"后台保护正在运行，但本机系统托盘不可用（{self._tray_reason or '原因未知'}）。\n\n"
-                    "【最小化到后台】窗口隐藏，进程留在后台守护，但没有托盘图标可唤回；\n"
-                    "【退出程序】停止后台保护并完全退出进程。")
-        else:
-            if has_tray:
-                box.setInformativeText(
-                    "当前没有开启后台保护（水印被删不会自动补回）。\n\n"
-                    "【最小化到后台】窗口隐藏到系统托盘，程序继续在后台运行；\n"
-                    "单击/双击托盘图标可重新打开窗口，右键托盘可退出程序。\n\n"
-                    "【退出程序】完全退出进程。")
-            else:
-                box.setInformativeText(
-                    f"当前没有开启后台保护。本机系统托盘也不可用（{self._tray_reason or '原因未知'}）。\n\n"
-                    "【最小化到后台】窗口隐藏，进程留在后台运行，但没有托盘图标可唤回；\n"
-                    "【退出程序】完全退出进程。")
-        btn_min = box.addButton("最小化到后台" if has_tray else "最小化到后台（无托盘图标）",
-                                QMessageBox.AcceptRole)
-        btn_quit = box.addButton("退出程序", QMessageBox.DestructiveRole)
-        btn_cancel = box.addButton("取消", QMessageBox.RejectRole)
-        box.setDefaultButton(btn_min)
-        box.exec()
-        clicked = box.clickedButton()
-        if clicked is btn_quit:
-            return "quit"
-        if clicked is btn_cancel:
-            return "cancel"
-        return "minimize"
-
     def _go_background(self):
         """隐藏窗口、进程留在后台（守护若在运行则继续补回水印）。"""
         self.hide()
@@ -1055,26 +999,24 @@ class App(QMainWindow):
                              "（本机托盘不可用，重新打开界面需再次启动程序）。")
 
     def closeEvent(self, event):
-        """关闭窗口时清理后台线程，避免进程无法退出（表现为关闭后卡顿/驻留）。
+        """关闭窗口 = 关闭页面，不退出后台（不弹任何询问）。
 
-        要点：
-        - **无论守护是否运行**都先弹询问：最小化到后台 / 退出程序 / 取消。
-          这样“点关闭到底会怎样”永远是用户自己决定的，不会突然消失。
+        - 点标题栏关闭按钮：窗口隐藏，进程保留，托盘图标可唤回；
+          守护（若开启）继续运行，水印被删会自动补回。
+        - 真正退出走托盘右键「退出程序」（_quitting=True 路径）。
+        - 自动化脚本可用环境变量 WM_CLOSE_CHOICE=quit|cancel 强制改变行为
+          （默认 minimize-to-background，无需人工干预）。
         - 真正退出时：守护线程已是 daemon，只发停止信号、绝不阻塞等待。
         - 兜底：启动一个计时线程，超时（6s）后若进程仍未自行退出，强制 os._exit(0)。
         - 工作/字体线程若超时仍未结束则强制 terminate。
         """
-        # 一律先问：最小化到后台，还是直接退出程序
         if not self._quitting:
-            if getattr(self, "_confirm_close", True) and self.isVisible():
-                choice = self._ask_close_choice()
-            else:
-                # 自动化脚本 / 托盘“退出程序”已明确表达要退出，无需再问
-                choice = "quit"
-            if choice == "cancel":
+            forced = os.environ.get("WM_CLOSE_CHOICE", "").strip().lower()
+            if forced == "cancel":
                 event.ignore()
                 return
-            if choice == "minimize":
+            if forced != "quit":
+                # 默认：只关闭页面，程序留在后台
                 event.ignore()
                 self._go_background()
                 return
@@ -1118,12 +1060,14 @@ class App(QMainWindow):
     def _on_result(self, ok, msg):
         if not ok:
             QMessageBox.critical(self, "失败", msg)
-        else:
-            self.status_label.setText("完成")
-            if self._last_action == "insert":
-                self._append_log("已生成带水印的新文件（原文件未改动）。请打开下方日志中 output 路径的文件查看；"
-                                 "在 Word/WPS 中需切到『页面视图/页面布局』才能看到水印。")
-                self._last_action = ""
+            return
+        self.status_label.setText("完成")
+        if self._last_action == "insert":
+            self._append_log("已生成带水印的新文件（原文件未改动）。请打开下方日志中 output 路径的文件查看；"
+                             "在 Word/WPS 中需切到『页面视图/页面布局』才能看到水印。")
+            self._last_action = ""
+        # 一键插入 / 一键清除完成后弹提示，用户点“确定”或直接关闭弹窗均可
+        QMessageBox.information(self, "任务已完成", "任务已完成")
 
     # ------------------------------------------------------------- 预览
     def _render_preview(self):
