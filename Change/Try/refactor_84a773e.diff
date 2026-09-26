@@ -1,0 +1,568 @@
+diff --git a/tests/unit/test_i18n.py b/tests/unit/test_i18n.py
+new file mode 100644
+index 0000000..ccb9369
+--- /dev/null
++++ b/tests/unit/test_i18n.py
+@@ -0,0 +1,92 @@
++"""
++i18n 不变式测试（风险 l：中文 UI 文案作 key 的长期维护）。
++
++设计本身（中文原文即 key、zh-CN 无翻译表、回退链兜底）是有意而为，功能不受影响，
++因此这里**不改动任何运行时代码**，只把“中文作 key”的契约与回退语义锁成测试，
++防止日后编辑中文文案或新增语种时静默漂移到无法翻译的状态。
++
++覆盖：
++- zh-CN 下 tr() 原样返回（不翻译）；
++- en 等语言能翻译、缺词条时按回退链兜底返回中文原文（绝不出现空串）；
++- trf 占位符正常格式化，且占位符写错时回退到原文格式而不崩；
++- FALLBACK 目标语言（zh-CN 除外）确实存在；
++- 任一非 zh-CN 翻译 dict 的 key 都必须是 en 里定义过的“规范中文 key”
++  （捕捉某语种中文 key 拼写错误导致整条翻译失效的隐患）；
++- resolve_ui_font 返回 str；set_lang 对未知语言码回退到默认。
++"""
++from __future__ import annotations
++
++import pytest
++
++from watermark_tool import i18n
++
++
++@pytest.fixture
++def restore_lang():
++    saved = i18n._cur
++    try:
++        yield
++    finally:
++        i18n.set_lang(saved)
++
++
++def test_tr_zh_cn_is_noop(restore_lang):
++    i18n.set_lang("zh-CN")
++    assert i18n.tr("Word 秒退") == "Word 秒退"
++    assert i18n.tr("") == ""
++    assert i18n.tr("不存在的文案XYZ") == "不存在的文案XYZ"
++
++
++def test_tr_en_translates(restore_lang):
++    i18n.set_lang("en")
++    assert i18n.tr("提示") == "Notice"
++    # 缺词条的 key 应回退到中文原文，绝不返回空串
++    missing = "這是一條絕對不存在的测试文案"
++    assert i18n.tr(missing) == missing
++
++
++def test_trf_placeholder_and_fallback(restore_lang):
++    i18n.set_lang("ja")
++    out = i18n.trf("颜色: {name}", name="赤")
++    assert out == "色: 赤"
++    # 占位符写错时回退到原文格式而不崩（trf 内部 except 兜底）
++    i18n.set_lang("zh-CN")
++    out2 = i18n.trf("颜色: {name}", name="红")
++    assert out2 == "颜色: 红"
++
++
++def test_fallback_targets_valid():
++    for _code, targets in i18n.FALLBACK.items():
++        for t in targets:
++            # zh-CN 是“中文原文即 key”的特殊目标，允许不在 T 中；其余必须是真实语种表
++            if t == "zh-CN":
++                continue
++            assert t in i18n.T, f"FALLBACK 目标 {t} 既非 zh-CN 也不在 T 中"
++
++
++def test_translation_keys_subset_of_en():
++    en_keys = set(i18n.T["en"])
++    for code, _name in i18n.LANGS:
++        if code == "zh-CN":
++            continue
++        extra = set(i18n.T.get(code, {})) - en_keys
++        assert not extra, f"{code} 含有 en 未定义的 key（中文 key 可能拼写错误）: {sorted(extra)[:5]}"
++
++
++def test_resolve_ui_font_returns_str(restore_lang):
++    for code, _name in i18n.LANGS:
++        val = i18n.resolve_ui_font(code)
++        assert isinstance(val, str), f"resolve_ui_font({code}) 应返回 str"
++
++
++def test_set_lang_unknown_falls_back(restore_lang):
++    assert i18n.set_lang("not-a-real-lang") == i18n.DEFAULT_LANG
++    # 回退后 tr 仍按默认（zh-CN）原样返回
++    assert i18n.tr("提示") == "提示"
++
++
++def test_has_and_missing(restore_lang):
++    i18n.set_lang("en")
++    assert i18n.has("提示")
++    assert "提示" not in i18n.missing(["提示"])
++    assert "不存在的文案XYZ" in i18n.missing(["不存在的文案XYZ"])
+diff --git a/watermark_tool/core.py b/watermark_tool/core.py
+index e98835d..53a5a9f 100644
+--- a/watermark_tool/core.py
++++ b/watermark_tool/core.py
+@@ -5,20 +5,29 @@
+ """
+ from __future__ import annotations
+ 
++import logging
+ import os
+ import shutil
+ 
+ from . import engine_docx, engine_com
+ 
++log = logging.getLogger(__name__)
++
+ 
+ def get_desktop() -> str:
+-    """返回当前用户的桌面路径；若取不到则返回源文件所在目录。"""
++    """返回当前用户的桌面路径；若取不到则返回源文件所在目录。
++
++    说明：此前用 `except Exception: pass` 静默吞掉所有异常，会藏匿真实的
++    IO/环境错误。这里收窄为文件操作可能抛出的 (OSError, ValueError)，
++    其余异常（多为代码 bug）会正常向上传播，便于排查；找不到桌面时
++    仍按设计回退到源文件目录（返回 None，由调用方处理）。
++    """
+     try:
+         desk = os.path.join(os.path.expanduser("~"), "Desktop")
+         if os.path.isdir(desk):
+             return desk
+-    except Exception:
+-        pass
++    except (OSError, ValueError) as e:
++        log.debug("定位桌面目录失败，将回退到源文件目录: %s", e)
+     return None
+ 
+ 
+@@ -76,12 +85,16 @@ def _use_com(path: str) -> bool:
+     return False
+ 
+ 
+-def insert_watermark(src_path: str, kinds, output_path: str = None, **opts) -> dict:
++def insert_watermark(src_path: str, kinds, output_path: str = None,
++                     preserve_existing: bool = False, **opts) -> dict:
+     """
+     插入水印。kinds 为包含 'text' / 'image' 的列表，可同时含两者（同时添加两类水印）。
+     默认【不破坏原文件】：复制到 output_path 后在副本上操作。
+     - output_path 为 None：默认输出到桌面/<原名>WaterMark<ext>。
+     - 若 output_path 与源文件相同：自动加后缀，避免覆盖原文件。
++    - preserve_existing=True：当 output_path 已存在时不从源文件覆盖，而是先在现有
++      副本上清除本工具写入的水印图形（不动正文），再重新写入——用于后台守护“补回”
++      场景，避免覆盖用户在输出文件上的正文修改。
+     - 返回 dict 内含 "output" 字段，标明实际写出位置。
+     """
+     src_path = os.path.abspath(src_path)
+@@ -97,10 +110,20 @@ def insert_watermark(src_path: str, kinds, output_path: str = None, **opts) -> d
+     if _use_com(src_path):
+         if not com_available():
+             raise RuntimeError("处理 .doc 需要本机安装 Microsoft Word。")
+-        res = engine_com.insert_watermark(src_path, kinds, output_path=output_path, **opts)
++        if preserve_existing and output_path and os.path.exists(output_path):
++            # 守护补回：在现有输出上先清后插，保留正文修改（.doc 仅 Windows+Word 可用）
++            engine_com.clear_watermark(output_path, output_path=output_path)
++            res = engine_com.insert_watermark(output_path, kinds, output_path=output_path, **opts)
++        else:
++            res = engine_com.insert_watermark(src_path, kinds, output_path=output_path, **opts)
+     else:
+-        shutil.copy2(src_path, output_path)  # 保留原文件，在新副本上加水印
+-        res = engine_docx.insert_watermark(output_path, kinds, **opts)
++        if preserve_existing and output_path and os.path.exists(output_path):
++            # 守护补回：在现有输出上先清后插，保留正文修改（只清本工具的水印图形）
++            engine_docx.clear_watermark(output_path)
++            res = engine_docx.insert_watermark(output_path, kinds, **opts)
++        else:
++            shutil.copy2(src_path, output_path)  # 保留原文件，在新副本上加水印
++            res = engine_docx.insert_watermark(output_path, kinds, **opts)
+     if isinstance(res, dict):
+         res["output"] = output_path
+     return res
+diff --git a/watermark_tool/engine_com.py b/watermark_tool/engine_com.py
+index c87bfc6..35f84e6 100644
+--- a/watermark_tool/engine_com.py
++++ b/watermark_tool/engine_com.py
+@@ -11,8 +11,11 @@ Word COM 水印引擎（需要本机安装 Microsoft Word）。
+ """
+ from __future__ import annotations
+ 
++import logging
+ import os
+ 
++log = logging.getLogger(__name__)
++
+ # Word 常量
+ from .engine_docx import decoy_name, tile_layout
+ 
+@@ -64,13 +67,13 @@ def _header_indices(doc, sec):
+     try:
+         if doc.PageSetup.OddAndEvenPagesHeaderFooter:
+             idxs.append(WD_HEADER_FOOTER_EVEN_PAGES)
+-    except Exception:
+-        pass
++    except Exception as e:
++        log.debug("读取奇偶页页眉设置失败（跳过）: %s", e)
+     try:
+         if sec.PageSetup.DifferentFirstPageHeaderFooter:
+             idxs.append(WD_HEADER_FOOTER_FIRST_PAGE)
+-    except Exception:
+-        pass
++    except Exception as e:
++        log.debug("读取首页不同页眉设置失败（跳过）: %s", e)
+     return idxs
+ 
+ 
+@@ -83,12 +86,12 @@ def _tag(shape, mark, disp_name=None):
+     """
+     try:
+         shape.Name = disp_name or mark
+-    except Exception:
+-        pass
++    except Exception as e:
++        log.warning("设置水印形状 Name 失败（将影响识别与清除）: %s", e)
+     try:
+         shape.AlternativeText = mark
+-    except Exception:
+-        pass
++    except Exception as e:
++        log.warning("设置水印形状 AlternativeText 标记失败（将影响识别与清除）: %s", e)
+ 
+ 
+ def _is_ours(shape):
+@@ -97,11 +100,12 @@ def _is_ours(shape):
+         nm = shape.Name
+         if nm in MARK_NAMES:
+             return True
+-    except Exception:
+-        pass
++    except Exception as e:
++        log.debug("读取形状 Name 失败: %s", e)
+     try:
+         return shape.AlternativeText in MARK_NAMES
+-    except Exception:
++    except Exception as e:
++        log.debug("读取形状 AlternativeText 失败: %s", e)
+         return False
+ 
+ 
+@@ -126,8 +130,8 @@ def _add_text_watermark(header, text, cn_font_name, latin_font_name, font_size,
+             tf.NameFarEast = cn_font_name
+             if latin_font_name:
+                 tf.Name = latin_font_name
+-        except Exception:
+-            pass
++        except Exception as e:
++            log.debug("设置中/西文字体失败（使用 Word 默认字体）: %s", e)
+     return shape
+ 
+ 
+@@ -139,8 +143,8 @@ def _add_image_watermark(header, image_path, angle, transparency, disp_name=None
+     shape.Rotation = angle
+     try:
+         shape.PictureFormat.Transparency = transparency
+-    except Exception:
+-        pass
++    except Exception as e:
++        log.warning("设置图片水印透明度失败（图片可能不透明）: %s", e)
+     shape.Line.Visible = False
+     shape.WrapFormat.Type = WD_WRAP_NONE
+     shape.ZOrder(MSO_SEND_BEHIND_TEXT)
+@@ -157,8 +161,8 @@ def _center(shape, page_w, page_h, offset_x=0.0, offset_y=0.0):
+         cy = (page_h - shape.Height) / 2 + offset_y / 100.0 * page_h
+         shape.Left = cx
+         shape.Top = cy
+-    except Exception:
+-        pass
++    except Exception as e:
++        log.warning("水印居中定位失败（位置可能偏移）: %s", e)
+ 
+ 
+ def _remove_in_header(header, clear_any=False):
+@@ -175,14 +179,14 @@ def _remove_in_header(header, clear_any=False):
+             nm = ""
+             try:
+                 nm = (s.Name or "").lower()
+-            except Exception:
+-                pass
++            except Exception as e:
++                log.debug("读取形状 Name 失败: %s", e)
+             is_native = (not is_ours) and clear_any and ("watermark" in nm)
+             if is_ours or is_native:
+                 s.Delete()
+                 removed += 1
+-        except Exception:
+-            pass
++        except Exception as e:
++            log.warning("删除水印形状失败（可能残留）: %s", e)
+     return removed
+ 
+ 
+@@ -212,12 +216,14 @@ def _iter_doc_parts(doc, redundant=False):
+         for hf in _header_indices(doc, sec):
+             try:
+                 yield sec.Headers(hf), page_w, page_h
+-            except Exception:
++            except Exception as e:
++                log.debug("读取页眉失败（跳过该页眉）: %s", e)
+                 continue
+             if redundant:
+                 try:
+                     yield sec.Footers(hf), page_w, page_h
+-                except Exception:
++                except Exception as e:
++                    log.debug("读取页脚失败（跳过该页脚）: %s", e)
+                     continue
+ 
+ 
+@@ -234,8 +240,8 @@ def _place(shape, x, y, w=None, h=None):
+             shape.Height = h
+         shape.Left = x
+         shape.Top = y
+-    except Exception:
+-        pass
++    except Exception as e:
++        log.warning("水印绝对定位失败（位置可能偏移）: %s", e)
+ 
+ 
+ # ---------------------------------------------------------------------------
+diff --git a/watermark_tool/engine_docx.py b/watermark_tool/engine_docx.py
+index 1cec374..d256976 100644
+--- a/watermark_tool/engine_docx.py
++++ b/watermark_tool/engine_docx.py
+@@ -191,14 +191,19 @@ def render_text_png(text: str, font_size: int, color, alpha: int,
+     if latin_path is None:
+         latin_path = fallback_path
+ 
+-    def _load(p):
++    def _load(p, index=0):
+         try:
+-            return ImageFont.truetype(p, font_size) if p else ImageFont.load_default()
++            # index= 用于 TTC 多 face 字体（如“微软雅黑 Light”对应 msyh.ttc 第 1 面）；
++            # 非 TTC 字体 index=0 即默认行为，与改动前一致（风险 k）。
++            return ImageFont.truetype(p, font_size, index=index) if p else ImageFont.load_default()
+         except Exception:
+             return ImageFont.load_default()
+ 
+-    cn_font = _load(cn_path)
+-    latin_font = _load(latin_path)
++    # 解析用户所选中/西文字体对应的 TTC face 索引，保证多 face 集合字体的正确字重被加载
++    cn_index = word_fonts.font_index_of(cn_font_name) if cn_font_name else 0
++    latin_index = word_fonts.font_index_of(latin_font_name) if latin_font_name else 0
++    cn_font = _load(cn_path, cn_index)
++    latin_font = _load(latin_path, latin_index)
+     fallback_font = _load(fallback_path) if fallback_path else cn_font
+ 
+     r, g, b = parse_color(color)
+@@ -485,13 +490,27 @@ _remove_in_header = _remove_in_part
+ 
+ 
+ def _add_drawing_to_part(part, drawing):
+-    """把 drawing 追加到页眉/页脚的一个新 run 中（必要时先创建独立 part）。"""
++    """把 drawing 追加到页眉/页脚的一个新 run 中（必要时先创建独立 part）。
++
++    注意（私有 API 依赖，风险 g）：`r._r` 是 python-docx 的“私有”内部属性（CT_R 元素）。
++    python-docx 没有公开 API 能把一个现成的 DrawingML anchor 注入到 run 里
++    （`run.add_picture` 只能新建行内图片，而水印需要“衬于文字下方 behindDoc”的
++    浮动型 anchor），因此这里只能用内部属性。一旦 python-docx 大版本改动 CT_R 结构，
++    这里可能失效——下面针对 AttributeError 做了可读的错误提示，便于第一时间定位，
++    而不是抛出晦涩的底层异常。成功路径与历史 XML 格式完全一致，行为不变。
++    """
+     # 触发 python-docx 为“链接到前一节”的页眉/页脚创建独立 part
+     if not part.paragraphs:
+         part.add_paragraph()
+     p = part.paragraphs[0]
+     r = p.add_run()
+-    r._r.append(drawing)
++    try:
++        r._r.append(drawing)
++    except AttributeError as e:  # python-docx 内部结构变动导致 _r 不可用
++        raise RuntimeError(
++            "无法将水印图形写入页眉/页脚：python-docx 内部接口(_r)不可用，"
++            "可能是 python-docx 版本不兼容，请升级本工具或固定 python-docx 版本。"
++        ) from e
+ 
+ 
+ # 兼容旧调用名
+diff --git a/watermark_tool/video.py b/watermark_tool/video.py
+index 82cbd44..40b21bc 100644
+--- a/watermark_tool/video.py
++++ b/watermark_tool/video.py
+@@ -340,7 +340,34 @@ def add_video_watermark(src: str, output: str, opts: dict,
+                     break
+             if progress_fn is not None and total:
+                 progress_fn(min(frame_idx, total), total)
++        # 先关闭 writer 把缓冲刷盘，否则下面的 _mux_audio 读到的临时文件可能不完整
++        writer.close()
++        frames_done = out_idx
++        if frames_done == 0:
++            raise RuntimeError("未能从视频中读出任何帧，请确认文件是有效的视频。")
++
++        # ---- 保留原音轨：用自带的 ffmpeg 重新封装（音视频都 copy，不重编码） ----
++        muxed = _mux_audio(tmp_vid, src, output)
++        if muxed:
++            if os.path.exists(tmp_vid):
++                os.remove(tmp_vid)
++        else:
++            # mux 失败（如无音频流或 ffmpeg 异常）则退化为无声视频
++            try:
++                if os.path.abspath(tmp_vid) != os.path.abspath(output):
++                    os.replace(tmp_vid, output)
++            except Exception:
++                pass
++
++        # 返回“实际生效”的播放方式合集：逐类型覆盖会让实际叠加方式多于全局选择
++        used = sorted({m for s in layers for m in (s.get("motions") or motions)})
++        return {"ok": True, "engine": "video", "frames": frames_done,
++                "output": output, "motion": "+".join(used),
++                "size": (W, H), "fps": round(out_fps, 3), "crf": crf}
+     finally:
++        # 无论正常完成还是中途异常，读写器都要关闭；临时无声文件只要还在
++        # （未被 os.replace 改名成成品、也未被上面的 mux 分支删除）就必须清理，
++        # 否则处理中途失败会在 %TMP% 下残留大量 .mp4 临时文件（风险 j）。
+         try:
+             writer.close()
+         except Exception:
+@@ -349,31 +376,11 @@ def add_video_watermark(src: str, output: str, opts: dict,
+             reader.close()
+         except Exception:
+             pass
+-
+-    frames_done = out_idx
+-    if frames_done == 0:
+-        if os.path.exists(tmp_vid):
+-            os.remove(tmp_vid)
+-        raise RuntimeError("未能从视频中读出任何帧，请确认文件是有效的视频。")
+-
+-    # ---- 保留原音轨：用自带的 ffmpeg 重新封装（音视频都 copy，不重编码） ----
+-    muxed = _mux_audio(tmp_vid, src, output)
+-    if muxed:
+         if os.path.exists(tmp_vid):
+-            os.remove(tmp_vid)
+-    else:
+-        # mux 失败（如无音频流或 ffmpeg 异常）则退化为无声视频
+-        try:
+-            if os.path.abspath(tmp_vid) != os.path.abspath(output):
+-                os.replace(tmp_vid, output)
+-        except Exception:
+-            pass
+-
+-    # 返回“实际生效”的播放方式合集：逐类型覆盖会让实际叠加方式多于全局选择
+-    used = sorted({m for s in layers for m in (s.get("motions") or motions)})
+-    return {"ok": True, "engine": "video", "frames": frames_done,
+-            "output": output, "motion": "+".join(used),
+-            "size": (W, H), "fps": round(out_fps, 3), "crf": crf}
++            try:
++                os.remove(tmp_vid)
++            except Exception:
++                pass
+ 
+ 
+ def _mux_audio(tmp_vid: str, src: str, output: str) -> bool:
+diff --git a/watermark_tool/watchdog.py b/watermark_tool/watchdog.py
+index 64ad6c4..f4e0539 100644
+--- a/watermark_tool/watchdog.py
++++ b/watermark_tool/watchdog.py
+@@ -38,9 +38,16 @@ class WatermarkWatchdog:
+         self.running = False
+ 
+     def _reinsert(self):
+-        """从原文件重新生成/补齐水印，并同步期望份数。"""
++        """从原文件重新生成/补齐水印，并同步期望份数。
++
++        风险处理（f）：此前一律从源文件重新生成输出，若用户在输出文件上做过
++        正文修改，补回水印时会把那些修改一并覆盖掉。这里改用 preserve_existing：
++        输出文件存在时仅在现有副本上“先清本工具水印、再重插”，正文修改得以保留；
++        仅当输出文件被整体删除（不存在）时才从源文件重建。
++        """
+         res = core.insert_watermark(self.src_path, self.kinds,
+-                                    output_path=self.output_path, **self.opts)
++                                    output_path=self.output_path,
++                                    preserve_existing=True, **self.opts)
+         if isinstance(res, dict) and res.get("inserted"):
+             self.expected = int(res["inserted"])
+         return res
+diff --git a/watermark_tool/word_fonts.py b/watermark_tool/word_fonts.py
+index 5758893..140498e 100644
+--- a/watermark_tool/word_fonts.py
++++ b/watermark_tool/word_fonts.py
+@@ -137,14 +137,22 @@ _VARIANT_RE = re.compile(
+ _KEEP_VARIANT_RE = re.compile(r"\b(light|black)\b", re.IGNORECASE)
+ 
+ 
++_INDEX_MAP: dict[str, int] = {}
++
++
+ def build_font_map() -> dict[str, str]:
+     """返回 {字体显示名: 绝对字体文件路径}。
+ 
+     来源：HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts
+     注册表值名即“显示名”，值即文件名（可能带盘符/目录，或相对 Fonts 目录，
+-    也可能形如 "msyh.ttc,0" 表示集合内索引）。非 Windows 或读取失败返回空字典。
++    也可能形如 "msyh.ttc,1" 表示字体集合(TTC)内的第 1 个 face）。非 Windows 或读取失败返回空字典。
++
++    副作用：同时填充模块级 _INDEX_MAP[显示名] = TTC 内的 face 索引（无索引为 0），
++    供 font_index_of() 取用，避免多 face TTC（如“微软雅黑 Light”）被错加载成第 0 面。
+     """
++    global _INDEX_MAP
+     mapping: dict[str, str] = {}
++    _INDEX_MAP = {}
+     try:
+         import winreg
+     except Exception:
+@@ -168,12 +176,24 @@ def build_font_map() -> dict[str, str]:
+         i += 1
+         if not name or not value:
+             continue
+-        path = str(value).split(",")[0].strip()  # 去掉 ",索引"
++        # 注册表值可能形如 "msyh.ttc,1" 表示 TTC 内第 1 个 face。此前直接用
++        # split(",")[0] 丢掉索引，导致多 face TTC 永远只加载第 0 面（风险 k）。
++        # 这里把文件系统路径与 face 索引分开：路径用于加载，索引供 Pillow 的
++        # ImageFont.truetype(..., index=) 使用。
++        parts = str(value).strip().split(",")
++        path = parts[0].strip()            # 文件系统路径
++        idx = 0
++        if len(parts) > 1:
++            try:
++                idx = int(parts[1].strip())
++            except ValueError:
++                idx = 0
+         if not path:
+             continue
+         if not os.path.isabs(path):
+             path = os.path.join(fonts_dir, path)
+         mapping[name] = path
++        _INDEX_MAP[name] = idx
+     return mapping
+ 
+ 
+@@ -260,6 +280,33 @@ def resolve_font_path(font_name: str | None) -> str | None:
+     return None
+ 
+ 
++def font_index_of(font_name: str | None) -> int:
++    """返回某显示名对应的 TTC face 索引（非 TTC / 未知时返回 0）。
++
++    与 resolve_font_path 走相同的解析顺序（中文别名表 → 注册表精确 → 注册表宽松），
++    以便返回的索引与 resolve_font_path 解析出的字体文件互相匹配。供 Pillow 的
++    ImageFont.truetype(..., index=) 使用，避免多 face 字体（如“微软雅黑 Light”
++    对应 msyh.ttc 的第 1 面）被错加载成第 0 面（风险 k）。
++    """
++    if not font_name:
++        return 0
++    target = _norm(font_name)
++    if not target:
++        return 0
++    # 中文别名表指向的通常是专用字体文件（单 face），其第 0 面即所求
++    if target in _ALIAS_FILES:
++        return 0
++    mapping = _get_map()
++    for disp, _path in mapping.items():
++        if _norm(disp) == target:
++            return _INDEX_MAP.get(disp, 0)
++    for disp, _path in mapping.items():
++        nd = _norm(disp)
++        if target in nd or nd in target:
++            return _INDEX_MAP.get(disp, 0)
++    return 0
++
++
+ def localized_font_names() -> list[str]:
+     """返回本机实际可用的**中文字体名**（宋体 / 微软雅黑 / 等线 …）。
+ 

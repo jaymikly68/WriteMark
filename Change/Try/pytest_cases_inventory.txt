@@ -1,6 +1,6 @@
 # WriteMark 用例清单（`pytest --collect-only -q` 导出）
 
-总计 111 个用例；标记【本系列新增】的 8 个文件已归档到本目录。
+总计 137 个用例；标记【本系列新增】的 11 个文件已归档到本目录，共 82 个用例。
 
 【原有】 tests/gui/test_close.py  —— 2 个用例
     - test_watchdog_close_no_block
@@ -33,9 +33,19 @@
     - test_clear_any_keeps_front_floating_shape
     - test_clear_any_scope_summary
 
-【本系列新增】 tests/unit/test_clear_kinds_matrix.py  —— 15 个用例
+【本系列新增】 tests/unit/test_clear_gui_decision.py  —— 9 个用例
+    - test_gui_only_text_watermark_clears_text_only
+    - test_gui_only_image_watermark_clears_image_only
+    - test_gui_dual_watermark_dialog_maps_choice_to_kinds[text-expected0]
+    - test_gui_dual_watermark_dialog_maps_choice_to_kinds[image-expected1]
+    - test_gui_dual_watermark_dialog_maps_choice_to_kinds[both-expected2]
+    - test_gui_dual_watermark_user_cancel_does_nothing
+    - test_gui_detection_failure_does_not_expand_clear_scope
+    - test_gui_detection_failure_leaves_document_untouched
+    - test_gui_no_watermark_detected_keeps_full_clear_semantics
+
+【本系列新增】 tests/unit/test_clear_kinds_matrix.py  —— 14 个用例
     - test_text_and_image_watermarks_are_distinguished_by_private_marks
-    - test_three_user_clear_choices_map_to_three_distinct_kinds
     - test_three_clear_entries_remove_different_watermark_sets
     - test_core_clear_entry_rebuilds_output_from_source
     - test_scenario_delete_text_watermark_only
@@ -49,6 +59,28 @@
     - test_clear_all_preserves_body_table_user_picture_shape_and_header_footer
     - test_watchdog_scenarios_do_not_touch_user_assets
     - test_legacy_reinsert_without_preserve_existing_loses_user_edit
+
+【本系列新增】 tests/unit/test_clear_repeat_and_multisec.py  —— 8 个用例
+    - test_clear_again_when_no_text_watermark_left
+    - test_clear_again_when_no_image_watermark_left
+    - test_clear_twice_when_already_empty
+    - test_insert_clear_insert_round_trip
+    - test_clear_between_text_and_image_insertions_is_independent
+    - test_multisection_clear_text_keeps_image_and_user_text
+    - test_multisection_clear_image_keeps_text
+    - test_multisection_clear_both_removes_everything
+
+【本系列新增】 tests/unit/test_clear_safety_scope.py  —— 10 个用例
+    - test_p0_1_text_only_watermark_clear_text_keeps_body
+    - test_p0_2_image_only_watermark_clear_image_keeps_body
+    - test_p0_3_p0_4_p0_5_clear_matrix_on_dual_watermark
+    - test_p0_6_user_text_in_same_run_as_text_watermark_survives
+    - test_p0_6b_user_text_in_same_run_as_image_watermark_survives
+    - test_p0_7_user_logo_and_behind_picture_survive_image_clear
+    - test_p0_8_user_behind_picture_survives_all_three_clear_choices
+    - test_single_type_doc_clear_does_not_eat_user_behind_picture[text]
+    - test_single_type_doc_clear_does_not_eat_user_behind_picture[image]
+    - test_kinds_limited_path_only_removes_marked_graphics
 
 【原有】 tests/unit/test_harden.py  —— 7 个用例
     - test_standard_mode_unchanged
@@ -142,4 +174,3 @@
     - test_close_event_no_error
     - test_alias_table_has_no_duplicate_keys
     - test_alias_values_unchanged_after_dedup
-

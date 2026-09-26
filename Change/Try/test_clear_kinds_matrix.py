@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import io
 import os
-import re
 import sys
 import tempfile
 
@@ -238,29 +237,11 @@ def test_text_and_image_watermarks_are_distinguished_by_private_marks(tmp_path=N
     print("[A1] 文字/图片水印由 MARK_TEXT / MARK_IMG 两个私有标记区分，detect_watermark_types 正确返回两者")
 
 
-def test_three_user_clear_choices_map_to_three_distinct_kinds(tmp_path=None):
-    """GUI 的三个按钮（去文字 / 去图片 / 都去）必须映射到三种不同的 kinds。
-
-    直接从 gui._clear() 的源码里把映射表抠出来求值——代码改了映射，这里立刻失败。
-    """
-    from watermark_tool import gui as gui_mod
-
-    src_fn = re.search(r'kinds\s*=\s*(\{.*?\})\[choice\]',
-                       __import__("inspect").getsource(gui_mod.App._clear), re.S)
-    assert src_fn, "gui._clear 里找不到 kinds 映射表（映射结构可能已改动）"
-    mapping = eval(src_fn.group(1))            # noqa: S307 - 测试内固定字面量
-    assert set(mapping) == {"text", "image", "both"}, \
-        f"三个按钮的返回键应保持 text/image/both，实际 {sorted(mapping)}"
-    assert mapping["text"] == ["text"], "「去除文字水印」只能传 kinds=['text']"
-    assert mapping["image"] == ["image"], "「去除图片水印」只能传 kinds=['image']"
-    assert set(mapping["both"]) == {"text", "image"}, "「都去除」必须两类都传"
-
-    # 用户只选一种类型时，_clear 不弹窗、直接把 kinds 留成 None（走全清）
-    src_code = __import__("inspect").getsource(gui_mod.App._clear)
-    assert 'if types == {"text", "image"}:' in src_code, (
-        "只有文档同时含两类水印时才弹窗；否则 kinds=None 走全清（clear_any），"
-        "这条行为本测试依赖它，被改动时应同时改这里")
-    print(f"[A2] GUI 三按钮 -> kinds 映射：{mapping}")
+# 原 A2（`test_three_user_clear_choices_map_to_three_distinct_kinds`）用
+# `inspect.getsource()` + `eval` 去抠 `_clear()` 的源码文本，属于对实现细节的过度绑定，
+# 而且它把「单类型时 kinds=None 走全清」这条**缺陷行为**当成了要守护的既定事实。
+# 真实行为（GUI 按 detected 类型选 kinds、检测失败不扩大范围）已由
+# tests/unit/test_clear_gui_decision.py 端到端覆盖，这里不再保留源码级断言。
 
 
 def test_three_clear_entries_remove_different_watermark_sets(tmp_path=None):

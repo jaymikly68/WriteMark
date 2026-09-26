@@ -1,9 +1,9 @@
-............x....x.........................................x.x.......... [ 64%]
-.......................................                                  [100%]
+............x........................................................... [ 52%]
+.............x.x.................................................        [100%]
 ============================== warnings summary ===============================
 tests/unit/test_word_fonts.py::test_cjk_fallback_rendering
   D:\workbuddy path\work\word-watermark-tool\tests\unit\test_word_fonts.py:266: DeprecationWarning: Image.Image.getdata is deprecated and will be removed in Pillow 14 (2027-10-15). Use get_flattened_data instead.
     assert 255 in set(img_west.split()[3].getdata()), "中文不应为空（应回退到中文字体）"
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-107 passed, 4 xfailed, 1 warning in 60.02s (0:01:00)
+134 passed, 3 xfailed, 1 warning in 63.41s (0:01:03)

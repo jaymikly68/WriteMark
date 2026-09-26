@@ -190,10 +190,12 @@ def test_clear_with_kinds_limited_is_safe():
     print("[review2] kinds 限定路径安全：只删本工具标记，用户图形保留")
 
 
-@pytest.mark.xfail(reason="已知风险：_detach_drawing 会整条 w:r 一起摘掉，若该 run 里同时"
-                          "有文字，文字会随图形一起消失（复现测试，未改实现）", strict=False)
 def test_clear_any_deletes_whole_run_including_sibling_text():
-    """放大效应：页眉 run 里“文字 + behindDoc 图形”并存时，文字会被连带删掉。"""
+    """放大效应：页眉 run 里“文字 + behindDoc 图形”并存时，文字**不许**被连带删掉。
+
+    该用例原先是 xfail（复现 `_detach_drawing` 整条 run 一起摘的老问题）。
+    修复后 `_detach_drawing` 只摘图形、run 非空就不动它，这里升级为正式回归断言。
+    """
     tmp = tempfile.mkdtemp()
     p = os.path.join(tmp, "d.docx")
     _make_doc(p)
