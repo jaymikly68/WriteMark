@@ -1,0 +1,145 @@
+# WriteMark 用例清单（`pytest --collect-only -q` 导出）
+
+总计 111 个用例；标记【本系列新增】的 8 个文件已归档到本目录。
+
+【原有】 tests/gui/test_close.py  —— 2 个用例
+    - test_watchdog_close_no_block
+    - test_worker_terminate_on_close
+
+【本系列新增】 tests/gui/test_close_all_workers.py  —— 2 个用例
+    - test_all_workers_shut_down_and_stay_within_force_exit_budget
+    - test_close_event_ignores_unused_worker_attributes
+
+【原有】 tests/gui/test_close_confirm.py  —— 6 个用例
+    - test_close_goes_background
+    - test_close_without_watchdog
+    - test_env_override_quit
+    - test_env_override_cancel
+    - test_done_popup
+    - test_quit_on_last_window_closed_disabled
+
+【原有】 tests/integration/test_single_instance.py  —— 2 个用例
+    - test_first_instance_wins_the_lock
+    - test_missing_qtnetwork_never_blocks_startup
+
+【本系列新增】 tests/unit/test_clear_any_scope.py  —— 9 个用例
+    - test_clear_any_deletes_user_own_behinddoc_header_picture
+    - test_clear_any_leaves_inline_and_front_floating_graphics
+    - test_clear_any_keeps_body_and_table_intact
+    - test_clear_any_still_removes_word_native_watermark_by_design
+    - test_clear_with_kinds_limited_is_safe
+    - test_clear_any_deletes_whole_run_including_sibling_text
+    - test_clear_any_keeps_user_drawing_shape
+    - test_clear_any_keeps_front_floating_shape
+    - test_clear_any_scope_summary
+
+【本系列新增】 tests/unit/test_clear_kinds_matrix.py  —— 15 个用例
+    - test_text_and_image_watermarks_are_distinguished_by_private_marks
+    - test_three_user_clear_choices_map_to_three_distinct_kinds
+    - test_three_clear_entries_remove_different_watermark_sets
+    - test_core_clear_entry_rebuilds_output_from_source
+    - test_scenario_delete_text_watermark_only
+    - test_scenario_delete_image_watermark_only
+    - test_scenario_delete_all_watermarks
+    - test_user_manually_deletes_text_watermark_via_xml
+    - test_user_manually_deletes_image_watermark_via_xml
+    - test_user_manually_deletes_both_watermarks_via_xml
+    - test_clear_text_kind_does_not_touch_image_watermark_or_user_objects
+    - test_clear_image_kind_does_not_touch_text_watermark_or_user_objects
+    - test_clear_all_preserves_body_table_user_picture_shape_and_header_footer
+    - test_watchdog_scenarios_do_not_touch_user_assets
+    - test_legacy_reinsert_without_preserve_existing_loses_user_edit
+
+【原有】 tests/unit/test_harden.py  —— 7 个用例
+    - test_standard_mode_unchanged
+    - test_tile_produces_grid
+    - test_redundant_writes_footer_only
+    - test_names_not_watermark_like
+    - test_clear_removes_tiled_and_footer
+    - test_count_watermarks
+    - test_watchdog_refills_partial_removal
+
+【原有】 tests/unit/test_i18n.py  —— 8 个用例
+    - test_tr_zh_cn_is_noop
+    - test_tr_en_translates
+    - test_trf_placeholder_and_fallback
+    - test_fallback_targets_valid
+    - test_translation_keys_subset_of_en
+    - test_resolve_ui_font_returns_str
+    - test_set_lang_unknown_falls_back
+    - test_has_and_missing
+
+【本系列新增】 tests/unit/test_insert_replacement_semantics.py  —— 5 个用例
+    - test_insert_text_then_image_only_removes_text_watermark
+    - test_insert_both_then_text_only_removes_image_watermark
+    - test_replacement_is_idempotent_not_accumulating
+    - test_replacement_does_not_touch_body_or_table
+    - test_gui_gather_kinds_derives_full_set_from_both_toggles
+
+【本系列新增】 tests/unit/test_ttc_index.py  —— 8 个用例
+    - test_index_map_no_stale_residue_between_builds
+    - test_index_map_matches_mapping_keys
+    - test_ttc_face_1_loads_when_index_is_supplied
+    - test_alias_table_does_not_bypass_ttc_index
+    - test_real_machine_face_selection_for_multi_face_ttc
+    - test_real_machine_ui_variant_uses_ui_face
+    - test_render_text_png_passes_face_index_into_pillow
+    - test_index_map_and_cache_are_coupled_characterization
+
+【原有】 tests/unit/test_video.py  —— 12 个用例
+    - test_video_fixed_and_scroll
+    - test_video_motion_matrix
+    - test_video_export_resolution_and_fps
+    - test_video_duration_preserved_across_fps
+    - test_video_crf_passthrough
+    - test_image_layer_supersample_sharpness
+    - test_gui_export_spec_defaults_and_limits
+    - test_gui_custom_fps_input
+    - test_docx_detect_and_clear_by_kind
+    - test_gui_clear_choice_dialog
+    - test_gui_video_run_button_clicked
+    - test_gui_motion_and_kind_matrix
+
+【本系列新增】 tests/unit/test_video_cleanup.py  —— 4 个用例
+    - test_video_temp_removed_after_success
+    - test_video_temp_removed_when_mux_falls_back
+    - test_video_temp_removed_on_midway_exception
+    - test_writer_closed_before_mux_and_twice_is_safe
+
+【本系列新增】 tests/unit/test_video_failure_paths.py  —— 4 个用例
+    - test_mux_fail_and_replace_fail_must_not_return_ok
+    - test_mux_fail_replace_fail_error_names_output
+    - test_get_writer_failure_removes_empty_tmp_and_keeps_reason
+    - test_get_writer_failure_leaves_no_orphan_across_repeats
+
+【本系列新增】 tests/unit/test_watchdog_preserve.py  —— 9 个用例
+    - test_preserve_existing_keeps_user_body_table_image_format
+    - test_watchdog_reinsert_roundtrip_preserves_user_edits
+    - test_watchdog_full_user_scenario_end_to_end
+    - test_watchdog_partial_deletion_reinserts_without_touching_user_edits
+    - test_watchdog_reinsert_never_pulls_source_content_into_output
+    - test_watchdog_output_deleted_rebuilds_from_source
+    - test_preserve_existing_never_reads_source_content
+    - test_preserve_existing_when_source_is_locked
+    - test_watchdog_reinsert_preserves_user_behinddoc_header_graphic
+
+【原有】 tests/unit/test_word_fonts.py  —— 18 个用例
+    - test_registry_map
+    - test_system_fonts_nonempty
+    - test_resolve_roundtrip
+    - test_resolve_unknown_returns_none
+    - test_get_word_fonts_no_crash
+    - test_collect_fonts_fallback
+    - test_engine_uses_font_name
+    - test_gui_apply_fonts
+    - test_engine_color_applied
+    - test_font_size_controls_size
+    - test_gui_font_combo_editable
+    - test_cn_latin_explicit_split
+    - test_cjk_fallback_rendering
+    - test_cn_font_names_resolve
+    - test_mixed_baseline_alignment
+    - test_close_event_no_error
+    - test_alias_table_has_no_duplicate_keys
+    - test_alias_values_unchanged_after_dedup
+
