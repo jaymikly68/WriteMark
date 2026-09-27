@@ -285,13 +285,27 @@ def add_video_watermark(src: str, output: str, opts: dict,
     # 先写到临时无声视频，最后再 mux 原音轨
     tmp_fd, tmp_vid = tempfile.mkstemp(suffix=".mp4")
     os.close(tmp_fd)
+    # ⚠ 下面这行 get_writer 必须包在 try 里。此前它在 try 之外：一旦
+    # iio.get_writer 自己抛异常（自带的 ffmpeg 二进制缺失/损坏、参数不被接受），
+    # 刚建的那个空临时 mp4 就没人清理，会在 %TMP% 下留下一个 0 字节孤儿。
+    # （异常原因本身不会被掩盖——下面 finally 里的 writer.close() 已被
+    #   except Exception 兜住，所以这里只需负责清文件。）
     # quality=None 关掉 imageio 的 crf≈25 默认档（那就是导出发糊的根源），
     # 改用显式 crf 控制清晰度；尺寸由每帧统一 resize 保证一致，无需再传 size。
-    writer = iio.get_writer(
-        tmp_vid, "ffmpeg", fps=out_fps, macro_block_size=1, quality=None,
-        output_params=["-crf", str(crf), "-preset", "veryfast",
-                       "-pix_fmt", "yuv420p"],
-    )
+    try:
+        writer = iio.get_writer(
+            tmp_vid, "ffmpeg", fps=out_fps, macro_block_size=1, quality=None,
+            output_params=["-crf", str(crf), "-preset", "veryfast",
+                           "-pix_fmt", "yuv420p"],
+        )
+    except Exception:
+        # 这里只负责清掉空临时文件，然后把原始异常原样抛出去
+        # （finally 里的 writer.close() 已被 except 兜住，不会干扰）。
+        try:
+            os.remove(tmp_vid)
+        except OSError:
+            pass
+        raise
 
     # ---- 帧率重采样：保证「时长不变」 ----
     # writer 用的 fps 是用户选的导出帧率，可能远高于（或低于）源视频帧率。若把源帧
@@ -352,12 +366,24 @@ def add_video_watermark(src: str, output: str, opts: dict,
             if os.path.exists(tmp_vid):
                 os.remove(tmp_vid)
         else:
-            # mux 失败（如无音频流或 ffmpeg 异常）则退化为无声视频
+            # mux 失败（如无音频流或 ffmpeg 异常）则退化为无声视频：把无声临时文件
+            # 改名成成品。⚠ 这是本分支**唯一**让 output 出现的动作，失败必须暴露：
+            # 以前这里 except: pass 把异常吞掉，随后照样 return {"ok": True}——
+            # 用户看到“成功”提示，输出文件却根本不存在（静默假成功）。
+            if os.path.abspath(tmp_vid) == os.path.abspath(output):
+                # 极端情况：临时文件恰好就是输出路径。此时无法改名，而 finally 又
+                # 会把 tmp_vid 删掉，等于“报成功又把成品删了”，因此宁可明确报错。
+                raise RuntimeError(
+                    "音频封装失败，且临时文件与输出路径相同（无法改名兜底），"
+                    "因此没有可用的输出文件。请检查输出路径是否与临时目录冲突。"
+                )
             try:
-                if os.path.abspath(tmp_vid) != os.path.abspath(output):
-                    os.replace(tmp_vid, output)
-            except Exception:
-                pass
+                os.replace(tmp_vid, output)
+            except Exception as e:
+                raise RuntimeError(
+                    f"音频封装失败，也无法把无声视频改名为输出文件（{e}）："
+                    f"输出文件未生成，请先确认输出路径可写、磁盘未满。"
+                ) from e
 
         # 返回“实际生效”的播放方式合集：逐类型覆盖会让实际叠加方式多于全局选择
         used = sorted({m for s in layers for m in (s.get("motions") or motions)})

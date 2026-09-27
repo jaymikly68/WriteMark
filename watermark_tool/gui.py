@@ -1,6 +1,5 @@
 """
-PySide6 (Qt) 一键 GUI：选择 Word 文件 → 设置文本/图像水印 → 一键插入/清除；
-可选开启“后台守护”，水印被删自动补回（反制清除）。
+PySide6 (Qt) 一键 GUI：选择 Word 文件 → 设置文本/图像水印 → 一键插入/清除。
 
 选 Qt 而非 tkinter 的原因：本打包环境的标准 Python 不含 tcl/tk（tkinter），
 而 PySide6 可 pip 安装、可被 PyInstaller 完整打包，最终 .exe 开箱即用。
@@ -13,11 +12,15 @@ PySide6 (Qt) 一键 GUI：选择 Word 文件 → 设置文本/图像水印 → �
 """
 from __future__ import annotations
 
+import logging
 import os
 import io
 import tempfile
 import sys
 import threading
+import time
+
+log = logging.getLogger(__name__)
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -31,7 +34,7 @@ from PySide6.QtCore import (Qt, QObject, QThread, Signal, QTimer, QStringListMod
 from PySide6.QtGui import (QColor, QImage, QPixmap, QIntValidator, QPainter, QPen,
                            QFont)
 
-from . import core, watchdog, preview, word_fonts, engine_docx, i18n
+from . import core, preview, word_fonts, engine_docx, i18n
 try:  # office_tweak 只依赖标准库，任何情况下缺了也不该拖垮整GUI
     from . import office_tweak as otw
 except Exception:  # pragma: no cover
@@ -152,7 +155,7 @@ class _MatchBottom(QObject):
     要让视频框底边与预览框底边齐平，最稳的是直接给视频整列定高：
         视频列高 = 「水印预览」框底边在窗口里的 y − 视频列顶边在窗口里的 y
                    + 排在视频框【下方】的尾部控件总高（含间距）
-    尾部控件（如移过来的「后台守护」框）在视频列内是定高的，不会跟着拉伸。
+    排在视频框下方的尾部控件在视频列内是定高的，不会跟着拉伸。
     只在高度真的变化时才写（否则 setFixedHeight → Resize → 再 sync 会来回抖）。
     """
 
@@ -519,7 +522,6 @@ class App(QMainWindow):
         self.img_offset_x = 0.0
         self.img_offset_y = 0.0
         self.image_path = ""
-        self.wd = None
         self._worker = None  # 持有 Worker 引用：QThread 若被 GC 回收而线程仍在运行，进程会直接 abort 崩溃
         self._preview_img = None
         self._last_action = ""
@@ -531,11 +533,6 @@ class App(QMainWindow):
         self.tile_rows = 5
         self.tile_cols = 2
         self.redundant = True          # 多份冗余嵌入（对可见外观零影响，默认开）
-        self._last_inserted = None     # 上次插入实际写入的水印份数（守护按份数校验）
-        self.tray = None
-        self._quitting = False
-        self._tray_tried = 0         # 托盘初始化尝试次数
-        self._tray_reason = ""       # 托盘初始化失败原因
 
         # 多语言界面（Polyglot UI）：恢复上次选择的语言；首次启动按系统 locale 取最接近的
         self._lang = self._load_saved_lang()
@@ -546,7 +543,6 @@ class App(QMainWindow):
         self.status_signal.connect(self._set_status)
 
         self._build()
-        self._setup_tray()
 
     # ---------------------------------------------------------- 线程安全日志
     def _append_log(self, msg):
@@ -558,7 +554,7 @@ class App(QMainWindow):
         self.status_label.setText(i18n.tr(msg))
 
     def thread_log(self, msg, verbose=False):
-        """供后台线程（守护）调用，切回主线程更新 UI。"""
+        """供后台线程调用，切回主线程更新 UI。"""
         if verbose:
             self.status_signal.emit(msg)
         else:
@@ -567,7 +563,7 @@ class App(QMainWindow):
     # ------------------------------------------------------------------ UI
     def _build(self):
         # 用滚动区域承载全部内容：水印类型（文本/图像）横向并排后整体仍可能较高，
-        # 滚动区域保证预览、按钮、守护等控件在任何屏幕高度下都可达，不会被裁掉。
+        # 滚动区域保证预览、按钮等控件在任何屏幕高度下都可达，不会被裁掉。
         content = QWidget()
         root = QVBoxLayout(content)
         root.setContentsMargins(10, 10, 10, 10)
@@ -965,23 +961,9 @@ class App(QMainWindow):
         h_main.addWidget(f_video, 1, Qt.AlignTop)
         root.addLayout(h_main)
 
-        # 守护：放在**右侧视频列**、「视频水印」框正下方（同宽），
-        # 原来挂在页面左下方，右侧那块空白就浪费了。
-        f_watch = self._make_group("后台守护（水印被删自动补回）")
-        vw = f_watch.layout()
-        self.watch_chk = QCheckBox("启用守护（水印被删自动补回）")
-        self.watch_chk.stateChanged.connect(self._toggle_watch); vw.addWidget(self.watch_chk)
-        row = QHBoxLayout(); row.addWidget(QLabel("检查间隔(秒):"))
-        self.interval_spin = QDoubleSpinBox(); self.interval_spin.setRange(0.2, 10)
-        self.interval_spin.setDecimals(2); self.interval_spin.setSingleStep(0.2); self.interval_spin.setValue(1.0)
-        row.addWidget(self.interval_spin)
-        vw.addLayout(row)
-        f_watch.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
-        f_video.layout().addWidget(f_watch, 0, Qt.AlignTop)
-
         # 视频框底边 = 左侧「水印预览」框底边（同一水平线）；tail 里的控件排在视频框
         # 下方，定高时要额外把它们的高度算进去（否则会把视频框压扁）。
-        self._v_bottom_eq = _MatchBottom(f_prev, f_video, tail=[f_watch])
+        self._v_bottom_eq = _MatchBottom(f_prev, f_video, tail=[])
 
         # 日志（含「Word 秒退」的诊断 / 修复 / 测速输出框）
         f_log = self._make_group("日志")
@@ -2503,122 +2485,23 @@ class App(QMainWindow):
         if busy:
             self.status_label.setText("处理中...")
 
-    # --------------------------------------------------------- 系统托盘常驻
-    def _setup_tray(self):
-        """建立系统托盘图标——这样关掉主窗口后守护仍能在后台运行。
-
-        托盘创建失败（部分精简版系统/资源管理器尚未就绪）时不能静默吞掉，
-        否则用户点关闭会直接走“退出进程”分支——这正是此前“开了后台保护、
-        点关闭却整个进程没了”的原因。这里记录原因并自动重试一次。
-        """
-        try:
-            if not QSystemTrayIcon.isSystemTrayAvailable():
-                raise RuntimeError("系统托盘不可用（QSystemTrayIcon.isSystemTrayAvailable() = False）")
-            tray = QSystemTrayIcon(self)
-            tray.setIcon(self.style().standardIcon(QStyle.SP_ComputerIcon))
-            tray.setToolTip("Word 一键水印工具（守护运行中）")
-            menu = QMenu()
-            act_show = menu.addAction("显示主窗口")
-            act_show.triggered.connect(self._show_from_tray)
-            self._act_stop = menu.addAction("停止守护")
-            self._act_stop.triggered.connect(self._stop_watch_from_tray)
-            menu.addSeparator()
-            act_quit = menu.addAction("退出程序")
-            act_quit.triggered.connect(self._quit_app)
-            tray.setContextMenu(menu)
-            tray.activated.connect(self._on_tray_activated)
-            tray.show()
-            self.tray = tray
-        except Exception as e:
-            self.tray = None
-            self._tray_reason = str(e)
-            self._tray_tried += 1
-            self._append_log(f"· 系统托盘初始化失败：{e}")
-            if self._tray_tried <= 1:
-                # 资源管理器（explorer）刚启动时托盘区可能尚未就绪，3 秒后重试一次
-                QTimer.singleShot(3000, self._setup_tray)
-
-    def _on_tray_activated(self, reason):
-        if reason == QSystemTrayIcon.Trigger:   # 左键单击：切回窗口
-            self._show_from_tray()
-
-    def _show_from_tray(self):
-        self.show()
-        self.raise_()
-        self.activateWindow()
-
-    def _stop_watch_from_tray(self):
-        if hasattr(self, "watch_chk"):
-            self.watch_chk.setChecked(False)     # 触发 _toggle_watch 停止守护
-        self._append_log("已从托盘停止守护。")
-
-    def _quit_app(self):
-        """托盘“退出程序”：真正结束进程（含守护与后台线程清理）。"""
-        self._quitting = True
-        if self.tray is not None:
-            try:
-                self.tray.hide()
-            except Exception:
-                pass
-        if self.wd:
-            self.wd.stop_nowait()
-            self.wd = None
-        self.close()
-        QApplication.quit()
-
-    def _go_background(self):
-        """隐藏窗口、进程留在后台（守护若在运行则继续补回水印）。"""
-        self.hide()
-        if self.wd is not None:
-            tip = ("守护已在后台继续运行，水印被删会自动补回。\n"
-                   "单击/双击托盘图标可重新打开窗口，右键托盘可停止守护 / 退出程序。")
-        else:
-            tip = ("程序已在后台运行（未开启后台保护）。\n"
-                   "单击/双击托盘图标可重新打开窗口，右键托盘可退出程序。")
-        shown = False
-        try:
-            if self.tray is not None:
-                self.tray.showMessage("Word 一键水印工具", tip,
-                                      QSystemTrayIcon.Information, 4000)
-                shown = True
-        except Exception:
-            pass
-        if shown:
-            self._append_log("已最小化到系统托盘，程序继续在后台运行。")
-        else:
-            self._append_log("窗口已隐藏，进程仍在后台运行"
-                             "（本机托盘不可用，重新打开界面需再次启动程序）。")
-
     def closeEvent(self, event):
-        """关闭窗口 = 关闭页面，不退出后台（不弹任何询问）。
+        """关闭窗口 = 退出程序（守护功能已移除，不再后台驻留）。
 
-        - 点标题栏关闭按钮：窗口隐藏，进程保留，托盘图标可唤回；
-          守护（若开启）继续运行，水印被删会自动补回。
-        - 真正退出走托盘右键「退出程序」（_quitting=True 路径）。
-        - 自动化脚本可用环境变量 WM_CLOSE_CHOICE=quit|cancel 强制改变行为
-          （默认 minimize-to-background，无需人工干预）。
-        - 真正退出时：守护线程已是 daemon，只发停止信号、绝不阻塞等待。
-        - 兜底：启动一个计时线程，超时（6s）后若进程仍未自行退出，强制 os._exit(0)。
-        - 工作/字体线程若超时仍未结束则强制 terminate。
+        - WM_CLOSE_CHOICE=cancel：仅忽略本次关闭，便于自动化测试；
+        - 其余情况：清理所有 worker 线程后退出。
+
+        兜底：无论后续清理是否卡住，超时(6s)后强制结束进程。
+        （pytest 下该兜底不真动手，避免回归跑一半被静默 os._exit。）
         """
-        if not self._quitting:
-            forced = os.environ.get("WM_CLOSE_CHOICE", "").strip().lower()
-            if forced == "cancel":
-                event.ignore()
-                return
-            if forced != "quit":
-                # 默认：只关闭页面，程序留在后台
-                event.ignore()
-                self._go_background()
-                return
+        forced = os.environ.get("WM_CLOSE_CHOICE", "").strip().lower()
+        if forced == "cancel":
+            event.ignore()
+            return
 
         # 兜底：无论后续清理是否卡住，超时(6s)后强制结束进程。
         # 6s 是刻意留出的余量：下面等待后台线程的完整路径最长约 3s，
-        # 必须让“正常清理”跑在兜底之前完成，否则明明能优雅退出却被硬杀
-        # （此前的 1.2s 就会误杀正在等待线程退出的正常关闭流程）。
-        # 注意：pytest 下这个兜底不能真动手——6 秒后它会把「整个测试进程」
-        # 静默 os._exit(0)，表现为回归跑到一半无报错中断（v1.3.9 踩到过）。
-        # 线程照常启动（行为一致、可测），只是回调在测试环境里空转。
+        # 必须让“正常清理”跑在兜底之前完成，否则明明能优雅退出却被硬杀。
         def _force_exit():
             if "PYTEST_CURRENT_TEST" in os.environ:
                 return
@@ -2627,15 +2510,7 @@ class App(QMainWindow):
         killer = threading.Timer(6.0, _force_exit)
         killer.daemon = True
         killer.start()
-        if self.tray is not None:
-            try:
-                self.tray.hide()
-            except Exception:
-                pass
 
-        if self.wd:
-            self.wd.stop_nowait()  # 仅置停止信号，不 join 阻塞
-            self.wd = None
         # 字体读取线程：一次性、可安全终止
         fw = getattr(self, "_font_worker", None)
         if fw is not None and fw.isRunning():
@@ -2643,19 +2518,39 @@ class App(QMainWindow):
             if not fw.wait(1000):
                 fw.terminate()
                 fw.wait(300)
-        # 工作线程：最多等 1.2 秒，超时强杀（总清理时间必须短于上面 6s 的兜底）
-        w = self._worker
-        if w is not None and w.isRunning():
-            w.requestInterruption()
-            w.quit()
-            if not w.wait(1200):
-                w.terminate()
-                w.wait(300)
+        # 工作线程：最多等 1.2 秒，超时强杀（总清理时间必须短于上面 6s 的兜底）。
+        # 注意必须覆盖**所有** worker：此前只处理了 self._worker，
+        # 视频/预览/Office 线程仍可能在跑（例如视频导出没走完就退出），
+        # 一旦触发下面的 os._exit(0)，它们的 finally（临时文件清理、writer 关闭）
+        # 都来不及执行，会留下半截输出文件和 %TMP% 里的孤立临时 mp4。
+        # 共享预算：上面 6s 兜底要求「总清理必须跑在它之前」，所以这里所有
+        # worker 的等待时间合计不能超过 SHUTDOWN_BUDGET，不能逐个各等满 1.2s
+        # （5 个 worker 串行最坏 7.5s 会越过兜底，反而制造真正的硬杀）。
+        SHUTDOWN_BUDGET = 2.5
+        deadline = time.monotonic() + SHUTDOWN_BUDGET
+        for name in ("_worker", "_v_worker", "_v_preview_worker", "_office_worker",
+                     "_font_worker"):
+            w = getattr(self, name, None)
+            if w is None or not w.isRunning():
+                continue
+            try:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    continue
+                requestInterruption = getattr(w, "requestInterruption", None)
+                if callable(requestInterruption):
+                    requestInterruption()
+                w.quit()
+                if not w.wait(int(min(1200, left * 1000))):
+                    w.terminate()
+                    w.wait(300)
+            except RuntimeError:
+                # 底层 QThread 已被 C++ 侧销毁（常见于关闭过程中对象提前释放），
+                # 此时线程已不在，忽略即可。
+                pass
         event.accept()
-        # 已显式关闭 setQuitOnLastWindowClosed，这里必须把事件循环也退出，
-        # 否则窗口关了但 app.exec() 不返回，会留下一个没有界面的僵尸进程。
+        # 显式退出事件循环，否则窗口关了但 app.exec() 不返回，留下僵尸进程。
         QApplication.quit()
-
     def _on_result(self, ok, msg):
         if not ok:
             QMessageBox.critical(self, "失败", msg)
@@ -2727,14 +2622,9 @@ class App(QMainWindow):
             self.out_edit.setText(out)
         self._last_action = "insert"
         path, opts = self.file_path, self._gather_opts()
-        self._last_inserted = None
 
         def job():
-            res = core.insert_watermark(path, kinds, output_path=out, **opts)
-            # 记住实际写入的份数：开启守护后按这个数量校验是否被删过
-            if isinstance(res, dict):
-                self._last_inserted = res.get("inserted")
-            return res
+            return core.insert_watermark(path, kinds, output_path=out, **opts)
 
         self._run(job)
 
@@ -2747,18 +2637,33 @@ class App(QMainWindow):
             out = core.default_output_path(self.file_path)
             self.out_edit.setText(out)
         kinds = None
-        # 仅对 .docx 检测：若文档同时含有“文字水印”和“图片水印”，弹窗让用户二选一/全选
+        # 仅对 .docx 检测。检测结果是**本次清除范围的依据**，必须逐类型落到 kinds，
+        # 否则会掉进 kinds=None -> clear_any=True 这个「扩大删除范围」的分支：
+        # 除了本工具的水印，还会把页眉里用户自己衬于文字下方的图片一起删掉。
         if not core._use_com(self.file_path):
             try:
                 types = engine_docx.detect_watermark_types(self.file_path)
-                if types == {"text", "image"}:
-                    choice = self._ask_clear_choice()
-                    if choice is None:        # 用户点了“取消”
-                        return
-                    kinds = {"text": ["text"], "image": ["image"],
-                             "both": ["text", "image"]}[choice]
-            except Exception:
-                kinds = None
+            except Exception as e:
+                # 检测失败绝不退化成“扩大删除范围”：直接取消本次清除并向用户报告。
+                # 真正的原因同时写入日志，方便事后排查（不吞异常）。
+                log.exception("水印检测失败，已取消本次清除: %s", e)
+                QMessageBox.warning(
+                    self, "提示",
+                    "水印检测失败，为避免误删内容，已取消本次清除。\n\n"
+                    f"错误：{type(e).__name__}: {e}")
+                return
+            if types == {"text", "image"}:
+                # 同时含两类水印：弹窗让用户逐项选择（行为与之前一致）
+                choice = self._ask_clear_choice()
+                if choice is None:        # 用户点了“取消”
+                    return
+                kinds = {"text": ["text"], "image": ["image"],
+                         "both": ["text", "image"]}[choice]
+            elif types == {"text"}:
+                kinds = ["text"]          # 只有文字水印：只删文字，不扩大范围
+            elif types == {"image"}:
+                kinds = ["image"]         # 只有图片水印：只删图片，不扩大范围
+            # 空集：文档里没有本工具识别到的水印，保持 kinds=None 的“全清”语义
         self._run(lambda: core.clear_watermark(self.file_path, output_path=out, kinds=kinds))
 
     def _ask_clear_choice(self):
@@ -2781,46 +2686,6 @@ class App(QMainWindow):
         if clicked is btn_both:
             return "both"
         return None
-
-    def _toggle_watch(self, state):
-        if self.watch_chk.isChecked():
-            if not self.file_path or not os.path.exists(self.file_path):
-                QMessageBox.warning(self, "提示", "请先选择有效的 Word 文件再启用守护。")
-                self.watch_chk.setChecked(False)
-                return
-            kinds = self._gather_kinds()
-            if not kinds:
-                QMessageBox.warning(self, "提示", "请至少启用一种水印再启用守护。")
-                self.watch_chk.setChecked(False)
-                return
-            out = self.out_edit.text().strip()
-            if not out:
-                out = core.default_output_path(self.file_path)
-                self.out_edit.setText(out)
-            if os.path.abspath(out) == os.path.abspath(self.file_path):
-                QMessageBox.warning(self, "提示",
-                                    "输出路径与源文件相同会覆盖原文件，请先修改输出路径。")
-                self.watch_chk.setChecked(False)
-                return
-            opts = self._gather_opts()
-            expect = None
-            try:
-                # 份数基准：优先用本次插入的实际份数；否则以“输出文件当前份数”为基准
-                if self._last_inserted:
-                    expect = int(self._last_inserted)
-                elif os.path.exists(out):
-                    expect = core.watermark_count(out) or None
-            except Exception:
-                expect = self._last_inserted
-            self.wd = watchdog.WatermarkWatchdog(
-                self.file_path, out, kinds, opts, interval=self.interval_spin.value(),
-                log=self.thread_log, expected=expect)
-            self.wd.start()
-            if expect:
-                self._append_log(f"守护水印份数基准：{expect} 份（被删掉任何一份都会自动补齐）。")
-        else:
-            if self.wd:
-                self.wd.stop(); self.wd = None
 
     def _on_output_changed(self, text):
         # 占位：输出路径变化时无需即时处理，仅保持可被外部读取
@@ -2858,7 +2723,7 @@ def _bring_window_up(win):
 
 
 def _acquire_single_instance(name=None):
-    """本机只允许一个实例常驻（否则会同时存在多个后台守护，互相抢着补水印）。
+    """本机只允许一个实例常驻，避免重复起出多个主窗口。
 
     返回 (QLocalServer | None, should_exit)：
       - 已有实例在跑 → 通知它把窗口唤出，本实例直接退出；
@@ -2904,10 +2769,7 @@ def main():
         return _run_elevated(mode)
 
     app = QApplication([])
-    # 关闭/隐藏主窗口不应自动结束进程：后台守护模式下窗口是隐藏的，
-    # 若保持默认 True，隐藏窗口可能会被判为“最后一个窗口已关闭”而连带退出应用。
-    app.setQuitOnLastWindowClosed(False)
-
+    # 守护功能已移除：关闭窗口即退出应用（保持 Qt 默认 quitOnLastWindowClosed=True）。
     server, already_running = _acquire_single_instance()
     if already_running:
         # 已有实例在跑：只把它唤出来，本实例不重复起后台

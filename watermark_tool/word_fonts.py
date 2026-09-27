@@ -77,14 +77,16 @@ _ALIAS_FILES: dict[str, tuple[str, ...]] = {
     "等线": ("deng.ttf",),
     "等线 light": ("dengl.ttf",),
     "等线 bold": ("dengb.ttf",),
-    "新宋体": ("nsimsun.ttc",),
     "微软正黑体": ("msjh.ttc",),
     "微软正黑体 ui": ("msjh.ttc",),
     "微软正黑体 light": ("msjhl.ttc",),
     "微软雅黑 ui": ("msyh.ttc",),
     "微软雅黑 ui light": ("msyhl.ttc",),
-    "华文中宋": ("stzhongs.ttf",),
 }
+# 注："新宋体"（与上面 nsimsun 条目相同）与 "华文中宋"（与上面 stzhongs 条目
+# 相同）曾在此表末尾各重复定义一次。字典字面量里后写的会静默覆盖先写的，
+# 值又完全一致，所以功能无差别，但一旦将来有人改了其中一份，另一份会被无声
+# 吃掉——因此不保留重复项，由 test_alias_table_has_no_duplicate_keys 把守。
 
 # 注册表里的英文显示名 → 中文环境下更常用的字体名。
 #

@@ -435,10 +435,25 @@ def _iter_parts(document, section, include_footers=False):
 
 
 def _detach_drawing(drawing):
-    """从文档中安全移除一个 drawing 元素（连同其外层 w:r 一并移除）。"""
+    """从文档中安全移除一个 drawing 元素。
+
+    安全约束：**只摘掉目标图形本身，绝不连带删掉同 run 内的其它内容**。
+
+    一个 `w:r` 里可以同时放 `w:t`（用户自己的文字）和 `w:drawing`（水印），
+    例如 Word 重新排版后合并 run、或旧版本工具留下的结构。若像以前那样
+    “整条 w:r 一起摘掉”，用户那部分文字会跟着水印一起消失。
+
+    因此这里分两步：
+    1. 先把目标 `w:drawing` 从 `w:r` 上摘下来；
+    2. 只有在该 run 剥掉图形后**已无任何子元素**时，才把空 run 一起移除
+       ——水印 run 正是这种情况，所以正常路径的结果与改动前完全一致。
+    """
     run = drawing.getparent()  # w:r
-    if run is not None and run.tag == qn("w:r") and run.getparent() is not None:
-        run.getparent().remove(run)
+    if run is not None and run.tag == qn("w:r"):
+        run.remove(drawing)
+        # 还有内容（用户文字 / 另一张图 / w:br 等）就必须保留这条 run
+        if len(run) == 0 and run.getparent() is not None:
+            run.getparent().remove(run)
     elif drawing.getparent() is not None:
         drawing.getparent().remove(drawing)
 
@@ -460,14 +475,27 @@ def _mark_of(drawing):
     return None
 
 
+def _is_picture(drawing) -> bool:
+    """图形是否为「图片」类（a:graphicData/@uri == drawingml/2006/picture）。
+
+    clear_any 的收窄条件：只有**图片**才允许凭“衬于文字下方 (behindDoc=1)”
+    这条结构特征被推定为水印。Word 原生水印本身就是图片，所以照旧会被清掉；
+    但用户在页眉里自己画的形状（Word 存成 mc:AlternateContent + wps:wsp，
+    uri 是 wordprocessingShape 而非 picture）或图表并不是水印，不该被连带删掉。
+    """
+    gd = drawing.find(".//" + qn("a:graphicData"))
+    return gd is not None and gd.get("uri") == PIC
+
+
 def _remove_in_part(part, name=None, clear_any=False):
     """移除页眉/页脚中的水印图形。
 
     - name 给定时：仅删除该标记的图形（插入前“替换”用）。
     - name 为 None 且 clear_any=False：删除所有本工具标记的水印（插入前“替换”用）。
     - name 为 None 且 clear_any=True：删除本工具标记的水印 **以及** 任何“衬于文字下方”
-      (behindDoc=1) 的图形——这样能清掉 Word 原生水印或其它工具留下的水印，
-      满足“去掉原本就有水印的 Word”的需求。
+      (behindDoc=1) 的**图片**图形——这样能清掉 Word 原生水印或其它工具留下的水印，
+      满足“去掉原本就有水印的 Word”的需求。仅限图片是为了不去动用户自己画
+      的形状（见 _is_picture）。
     """
     root = part._element
     removed = 0
@@ -479,7 +507,7 @@ def _remove_in_part(part, name=None, clear_any=False):
             if mark == name:
                 _detach_drawing(drawing)
                 removed += 1
-        elif mark is not None or (clear_any and behind):
+        elif mark is not None or (clear_any and behind and _is_picture(drawing)):
             _detach_drawing(drawing)
             removed += 1
     return removed

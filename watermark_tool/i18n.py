@@ -139,7 +139,6 @@ def resolve_ui_font(code: str) -> str:
 T["en"] = {
     # ---- 分组标题 ----
     "Word 秒退（修复关闭 Word 时的十几秒卡顿）": "Word slow-close fix (stop the 10s+ hang on exit)",
-    "后台守护（水印被删自动补回）": "Background guard (restore the watermark if deleted)",
     "图像水印": "Image watermark",
     "文本水印": "Text watermark",
     "Word 秒退": "Word slow-close fix",
@@ -207,7 +206,6 @@ T["en"] = {
     "可选加码（慎用）": "Optional extras (risky)",
     "未检测": "Not checked",
     "检查间隔(秒):": "Check interval (s):",
-    "启用守护（水印被删自动补回）": "Enable guard (restore if deleted)",
     # ---- 预览 / 主操作 ----
     "拖拽自定义位置（在预览图上拖动水印）": "Drag to place (drag the watermark on the preview)",
     "预览水印": "Preview watermark",
@@ -287,10 +285,8 @@ T["en"] = {
     "请输入 1~300 之间的整数帧率。": "Enter a whole frame rate between 1 and 300.",
     "帧率需在 1~300 之间，当前为 {val}。": "Frame rate must be between 1 and 300; current value is {val}.",
     "请先选择有效的 Word 文件。": "Please select a valid Word file first.",
-    "请先选择有效的 Word 文件再启用守护。": "Select a valid Word file before enabling the guard.",
     "请至少启用一种水印（勾选“启用文本水印”或“启用图像水印”）。":
         "Enable at least one watermark (“Enable text watermark” or “Enable image watermark”).",
-    "请至少启用一种水印再启用守护。": "Enable at least one watermark before enabling the guard.",
     "已启用图像水印，但还未选择水印图片。": "Image watermark is enabled but no image is selected.",
     "请先选择有效的视频文件。": "Please select a valid video file first.",
     "请至少启用一种水印（文字或图片）。": "Enable at least one watermark (text or image).",
@@ -365,7 +361,6 @@ T["en"] = {
 
 T["zh-TW"] = {
     "Word 秒退（修复关闭 Word 时的十几秒卡顿）": "Word 秒退（修正關閉 Word 時的十幾秒卡頓）",
-    "后台守护（水印被删自动补回）": "後台守護（浮水印被刪自動補回）",
     "图像水印": "圖像浮水印",
     "文本水印": "文字浮水印",
     "Word 秒退": "Word 秒退",
@@ -427,7 +422,6 @@ T["zh-TW"] = {
     "可选加码（慎用）": "可選加碼（慎用）",
     "未检测": "未檢測",
     "检查间隔(秒):": "檢查間隔(秒):",
-    "启用守护（水印被删自动补回）": "啟用守護（浮水印被刪自動補回）",
     "拖拽自定义位置（在预览图上拖动水印）": "拖曳自訂位置（在預覽圖上拖動浮水印）",
     "预览水印": "預覽浮水印",
     "保存预览图": "儲存預覽圖",
@@ -498,10 +492,8 @@ T["zh-TW"] = {
     "请输入 1~300 之间的整数帧率。": "請輸入 1~300 之間的整數影格率。",
     "帧率需在 1~300 之间，当前为 {val}。": "影格率需在 1~300 之間，目前為 {val}。",
     "请先选择有效的 Word 文件。": "請先選擇有效的 Word 檔案。",
-    "请先选择有效的 Word 文件再启用守护。": "請先選擇有效的 Word 檔案再啟用守護。",
     "请至少启用一种水印（勾选“启用文本水印”或“启用图像水印”）。":
         "請至少啟用一種浮水印（勾選「啟用文字浮水印」或「啟用圖像浮水印」）。",
-    "请至少启用一种水印再启用守护。": "請至少啟用一種浮水印再啟用守護。",
     "已启用图像水印，但还未选择水印图片。": "已啟用圖像浮水印，但尚未選擇浮水印圖片。",
     "请先选择有效的视频文件。": "請先選擇有效的影片檔案。",
     "请至少启用一种水印（文字或图片）。": "請至少啟用一種浮水印（文字或圖片）。",
@@ -557,7 +549,6 @@ T["zh-TW"] = {
 
 T["ja"] = {
     "Word 秒退（修复关闭 Word 时的十几秒卡顿）": "Word 秒終了（終了時の十数秒フリーズを修正）",
-    "后台守护（水印被删自动补回）": "バックグラウンド監視（透かしが削除されたら自動復元）",
     "图像水印": "画像透かし",
     "文本水印": "文字透かし",
     "Word 秒退": "Word 秒終了",
@@ -618,7 +609,6 @@ T["ja"] = {
     "可选加码（慎用）": "追加オプション（要注意）",
     "未检测": "未検査",
     "检查间隔(秒):": "チェック間隔(秒):",
-    "启用守护（水印被删自动补回）": "監視を有効化（削除されたら復元）",
     "拖拽自定义位置（在预览图上拖动水印）": "ドラッグで位置指定（プレビュー上で透かしを移動）",
     "预览水印": "透かしをプレビュー",
     "保存预览图": "プレビュー画像を保存",
@@ -690,10 +680,8 @@ T["ja"] = {
     "请输入 1~300 之间的整数帧率。": "1~300 の整数でフレームレートを入力してください。",
     "帧率需在 1~300 之间，当前为 {val}。": "フレームレートは 1~300 の範囲で指定してください（現在 {val}）。",
     "请先选择有效的 Word 文件。": "有効な Word ファイルを選択してください。",
-    "请先选择有效的 Word 文件再启用守护。": "監視を有効にする前に有効な Word ファイルを選択してください。",
     "请至少启用一种水印（勾选“启用文本水印”或“启用图像水印”）。":
         "少なくとも 1 種類の透かしを有効にしてください（「文字透かしを有効化」または「画像透かしを有効化」）。",
-    "请至少启用一种水印再启用守护。": "監視を有効にする前に少なくとも 1 種類の透かしを有効にしてください。",
     "已启用图像水印，但还未选择水印图片。": "画像透かしが有効ですが、透かし画像が未選択です。",
     "请先选择有效的视频文件。": "有効な動画ファイルを選択してください。",
     "请至少启用一种水印（文字或图片）。": "少なくとも 1 種類の透かし（文字または画像）を有効にしてください。",
@@ -760,7 +748,6 @@ T["ja"] = {
 
 T["ko"] = {
     "Word 秒退（修复关闭 Word 时的十几秒卡顿）": "Word 즉시 종료(Word 종료 시 십수 초 멈춤 수정)",
-    "后台守护（水印被删自动补回）": "백그라운드 감시(워터마크가 삭제되면 자동 복구)",
     "图像水印": "이미지 워터마크",
     "文本水印": "텍스트 워터마크",
     "Word 秒退": "Word 즉시 종료",
@@ -821,7 +808,6 @@ T["ko"] = {
     "可选加码（慎用）": "추가 옵션(주의)",
     "未检测": "미검사",
     "检查间隔(秒):": "검사 간격(초):",
-    "启用守护（水印被删自动补回）": "감시 사용(삭제되면 자동 복구)",
     "拖拽自定义位置（在预览图上拖动水印）": "드래그로 위치 지정(미리보기에서 워터마크 이동)",
     "预览水印": "워터마크 미리보기",
     "保存预览图": "미리보기 이미지 저장",
@@ -892,10 +878,8 @@ T["ko"] = {
     "请输入 1~300 之间的整数帧率。": "1~300 사이의 정수 프레임 레이트를 입력하세요.",
     "帧率需在 1~300 之间，当前为 {val}。": "프레임 레이트는 1~300 사이여야 합니다(현재 {val}).",
     "请先选择有效的 Word 文件。": "먼저 올바른 Word 파일을 선택하세요.",
-    "请先选择有效的 Word 文件再启用守护。": "감시를 켜기 전에 올바른 Word 파일을 선택하세요.",
     "请至少启用一种水印（勾选“启用文本水印”或“启用图像水印”）。":
         "워터마크를 하나 이상 사용하세요(「텍스트 워터마크 사용」 또는 「이미지 워터마크 사용」 선택).",
-    "请至少启用一种水印再启用守护。": "감시를 켜기 전에 워터마크를 하나 이상 사용하세요.",
     "已启用图像水印，但还未选择水印图片。": "이미지 워터마크를 켰지만 이미지를 선택하지 않았습니다.",
     "请先选择有效的视频文件。": "먼저 올바른 동영상 파일을 선택하세요.",
     "请至少启用一种水印（文字或图片）。": "워터마크를 하나 이상 사용하세요(텍스트 또는 이미지).",
@@ -963,7 +947,6 @@ T["ko"] = {
 T["ru"] = {
     "Word 秒退（修复关闭 Word 时的十几秒卡顿）":
         "Быстрое закрытие Word (убирает зависание на десятки секунд)",
-    "后台守护（水印被删自动补回）": "Фоновая защита (вернёт водяной знак при удалении)",
     "图像水印": "Графический водяной знак",
     "文本水印": "Текстовый водяной знак",
     "Word 秒退": "Быстрое закрытие Word",
@@ -1026,7 +1009,6 @@ T["ru"] = {
     "可选加码（慎用）": "Доп. меры (осторожно)",
     "未检测": "Не проверено",
     "检查间隔(秒):": "Интервал проверки (с):",
-    "启用守护（水印被删自动补回）": "Включить защиту (вернуть при удалении)",
     "拖拽自定义位置（在预览图上拖动水印）":
         "Перетаскивание для позиции (знак перетаскивается на предпросмотре)",
     "预览水印": "Предпросмотр",
@@ -1101,10 +1083,8 @@ T["ru"] = {
     "请输入 1~300 之间的整数帧率。": "Введите целую частоту кадров от 1 до 300.",
     "帧率需在 1~300 之间，当前为 {val}。": "Частота кадров должна быть от 1 до 300; сейчас {val}.",
     "请先选择有效的 Word 文件。": "Сначала выберите существующий файл Word.",
-    "请先选择有效的 Word 文件再启用守护。": "Перед включением защиты выберите существующий файл Word.",
     "请至少启用一种水印（勾选“启用文本水印”或“启用图像水印”）。":
         "Включите хотя бы один знак («Включить текстовый знак» или «Включить графический знак»).",
-    "请至少启用一种水印再启用守护。": "Перед включением защиты включите хотя бы один водяной знак.",
     "已启用图像水印，但还未选择水印图片。": "Графический знак включён, но изображение не выбрано.",
     "请先选择有效的视频文件。": "Сначала выберите существующий видеофайл.",
     "请至少启用一种水印（文字或图片）。": "Включите хотя бы один знак (текст или изображение).",
@@ -1180,7 +1160,6 @@ T["ru"] = {
 T["de"] = {
     "Word 秒退（修复关闭 Word 时的十几秒卡顿）":
         "Word-Sofortschluss (behebt das lange Hängen beim Schließen)",
-    "后台守护（水印被删自动补回）": "Hintergrundwächter (stellt gelöschtes Wasserzeichen wieder her)",
     "图像水印": "Bild-Wasserzeichen",
     "文本水印": "Text-Wasserzeichen",
     "Word 秒退": "Word-Sofortschluss",
@@ -1243,7 +1222,6 @@ T["de"] = {
     "可选加码（慎用）": "Zusatzoptionen (Vorsicht)",
     "未检测": "Nicht geprüft",
     "检查间隔(秒):": "Prüfintervall (s):",
-    "启用守护（水印被删自动补回）": "Wächter aktivieren (bei Löschung wiederherstellen)",
     "拖拽自定义位置（在预览图上拖动水印）":
         "Position ziehen (Wasserzeichen in der Vorschau verschieben)",
     "预览水印": "Vorschau",
@@ -1320,11 +1298,9 @@ T["de"] = {
     "请输入 1~300 之间的整数帧率。": "Bitte eine ganze Bildrate zwischen 1 und 300 eingeben.",
     "帧率需在 1~300 之间，当前为 {val}。": "Die Bildrate muss zwischen 1 und 300 liegen; aktuell {val}.",
     "请先选择有效的 Word 文件。": "Bitte zuerst eine gültige Word-Datei wählen.",
-    "请先选择有效的 Word 文件再启用守护。": "Vor dem Aktivieren des Wächters eine gültige Word-Datei wählen.",
     "请至少启用一种水印（勾选“启用文本水印”或“启用图像水印”）。":
         "Mindestens ein Wasserzeichen aktivieren („Text-Wasserzeichen aktivieren“ oder "
         "„Bild-Wasserzeichen aktivieren“).",
-    "请至少启用一种水印再启用守护。": "Vor dem Aktivieren des Wächters mindestens ein Wasserzeichen aktivieren.",
     "已启用图像水印，但还未选择水印图片。": "Bild-Wasserzeichen ist aktiv, aber kein Bild gewählt.",
     "请先选择有效的视频文件。": "Bitte zuerst eine gültige Videodatei wählen.",
     "请至少启用一种水印（文字或图片）。": "Mindestens ein Wasserzeichen aktivieren (Text oder Bild).",
@@ -1404,7 +1380,6 @@ T["de"] = {
 T["fr"] = {
     "Word 秒退（修复关闭 Word 时的十几秒卡顿）":
         "Fermeture rapide de Word (corrige le blocage de plusieurs secondes)",
-    "后台守护（水印被删自动补回）": "Surveillance (restaure le filigrane supprimé)",
     "图像水印": "Filigrane image",
     "文本水印": "Filigrane texte",
     "Word 秒退": "Fermeture rapide de Word",
@@ -1467,7 +1442,6 @@ T["fr"] = {
     "可选加码（慎用）": "Options supplémentaires (prudence)",
     "未检测": "Non vérifié",
     "检查间隔(秒):": "Intervalle de contrôle (s) :",
-    "启用守护（水印被删自动补回）": "Activer la surveillance (restauration automatique)",
     "拖拽自定义位置（在预览图上拖动水印）":
         "Position par glisser (déplacer le filigrane sur l'aperçu)",
     "预览水印": "Aperçu",
@@ -1545,12 +1519,8 @@ T["fr"] = {
     "帧率需在 1~300 之间，当前为 {val}。":
         "La fréquence d'images doit être entre 1 et 300 ; valeur actuelle : {val}.",
     "请先选择有效的 Word 文件。": "Sélectionnez d'abord un fichier Word valide.",
-    "请先选择有效的 Word 文件再启用守护。":
-        "Sélectionnez un fichier Word valide avant d'activer la surveillance.",
     "请至少启用一种水印（勾选“启用文本水印”或“启用图像水印”）。":
         "Activez au moins un filigrane (« Activer le filigrane texte » ou « Activer le filigrane image »).",
-    "请至少启用一种水印再启用守护。":
-        "Activez au moins un filigrane avant d'activer la surveillance.",
     "已启用图像水印，但还未选择水印图片。":
         "Le filigrane image est activé, mais aucune image n'est choisie.",
     "请先选择有效的视频文件。": "Sélectionnez d'abord un fichier vidéo valide.",

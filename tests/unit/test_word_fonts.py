@@ -370,6 +370,67 @@ def test_close_event_no_error():
     print("[gui] closeEvent 线程清理 + 兜底强退计时线程 启动正常")
 
 
+def _alias_dict_keys():
+    """从 _ALIAS_FILES 的源码里取出所有字面的 key（不去重），用于查重复定义。
+
+    直接看 dict 对象拿不到重复信息——Python 字典字面量里后写的同名 key
+    会在构造时被静默丢弃，只会留下最后一个。所以只能回到源码层。
+    """
+    import ast
+    import inspect
+    from watermark_tool import word_fonts
+
+    # 取整个模块源码再定位赋值语句：_ALIAS_FILES 带类型注解，
+    # inspect.getsource(dict_obj) 拿不到源码，只能按名字找这个 AnnAssign。
+    tree = ast.parse(inspect.getsource(word_fonts))
+    keys = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.AnnAssign, ast.Assign)):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        names = [t.id for t in targets if isinstance(t, ast.Name)]
+        if "_ALIAS_FILES" not in names or not isinstance(node.value, ast.Dict):
+            continue
+        for k in node.value.keys:
+            if isinstance(k, ast.Constant) and isinstance(k.value, str):
+                keys.append(k.value)
+    return keys
+
+
+def test_alias_table_has_no_duplicate_keys():
+    # 回归：_ALIAS_FILES 里 "新宋体"、"华文中宋" 曾各定义两次（值相同），
+    # 字典字面量中后者静默覆盖前者。值一致时看不出问题，哪天有人只改了
+    # 其中一份，另一份就会无声失效——查源码级重复，把这类“假改动”挡住。
+    keys = _alias_dict_keys()
+    assert keys, "未能从源码解析出别名表 key，测试本身失效"
+    dupes = sorted({k for k in keys if keys.count(k) > 1})
+    assert not dupes, f"_ALIAS_FILES 存在重复 key（后者会静默覆盖前者）: {dupes}"
+
+    # 去重不能把已支持的字体名弄丢
+    table = word_fonts._ALIAS_FILES
+    for name in ("新宋体", "华文中宋", "微软雅黑", "微软雅黑 ui", "黑体", "宋体"):
+        assert name in table, f"去重后丢失了字体别名: {name}"
+    print(f"[alias] _ALIAS_FILES 共 {len(table)} 项，无重复 key")
+
+
+def test_alias_values_unchanged_after_dedup():
+    # 只删重复项、不改值：抽掉 key 后，剩余每项对应的字体文件应与已知的
+    # 中文环境约定一致（防止“顺手清理”时把值也改错了）。
+    table = word_fonts._ALIAS_FILES
+    expect = {
+        "新宋体": ("nsimsun.ttc",),
+        "华文中宋": ("stzhongs.ttf",),
+        "微软雅黑": ("msyh.ttc", "msyh.ttf"),
+        "微软雅黑 ui": ("msyh.ttc",),
+        "黑体": ("simhei.ttf",),
+        "楷体": ("simkai.ttf",),
+        "等线 bold": ("dengb.ttf",),
+    }
+    bad = {k: table.get(k) for k in expect if table.get(k) != expect[k]}
+    assert not bad, f"别名表取值与预期不符（可能被误改）: {bad}"
+    print("[alias] 去重后各字体别名指向的字体文件保持不变")
+
+
 if __name__ == "__main__":
     test_registry_map()
     test_system_fonts_nonempty()
@@ -386,5 +447,7 @@ if __name__ == "__main__":
     test_cjk_fallback_rendering()
     test_cn_font_names_resolve()
     test_mixed_baseline_alignment()
+    test_alias_table_has_no_duplicate_keys()
+    test_alias_values_unchanged_after_dedup()
     test_close_event_no_error()
     print("\n全部字体功能测试通过 ✅")

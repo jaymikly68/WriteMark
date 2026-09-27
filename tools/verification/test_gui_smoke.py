@@ -47,7 +47,6 @@ def main():
     assert win.font_spin.decimals() == 2
     assert win.text_scale_spin.decimals() == 2
     assert win.img_scale_spin.decimals() == 2
-    assert win.interval_spin.decimals() == 2
 
     # 关闭文本、仅图像
     win.text_chk.setChecked(False)

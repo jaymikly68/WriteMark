@@ -140,13 +140,10 @@ def main():
         has_split_ui = (any("中文字体:" == c for c in consts)
                         and any("西文字体:" == c for c in consts)
                         and "cn_font_combo" in names and "latin_font_combo" in names)
-        # 防去除加固：平铺/冗余开关 + 系统托盘常驻
+        # 防去除加固：平铺/冗余开关
         has_harden = ("tile_chk" in names and "redundant_chk" in names
                       and "tile_rows_spin" in names and "_on_harden_changed" in names
                       and any("平铺满页" in c for c in consts))
-        has_tray = ("QSystemTrayIcon" in names and "_setup_tray" in names
-                    and "_quit_app" in names and "_show_from_tray" in names
-                    and "_stop_watch_from_tray" in names)
         # v1.4.2 版式：两列底边平行（_EqualBottoms/_col_eq）+ 视频输入输出行上移
         # v1.4.3 版式：Word 秒退框并入文本水印列、与防去除加固同带（_band_eq）
         has_layout42 = ("_EqualBottoms" in names and "_col_eq" in names
@@ -160,7 +157,6 @@ def main():
         has_layout44 = ("_MatchBottom" in names and "_v_bottom_eq" in names
                         and "v_progress" in names and "v_frame_label" in names)
         # v1.5.0 多语言界面（Polyglot UI）：i18n 切换机制编入 gui
-        # （后台守护并入视频列由 f_watch/_MatchBottom tail 覆盖，上面已校验）
         has_i18n = ("_retranslate" in names and "_bind_combo_keys" in names
                     and "_i18n_scan" in names and "_apply_ui_font" in names
                     and "_load_saved_lang" in names and "_combo_key" in names
@@ -168,12 +164,12 @@ def main():
         print(f"watermark_tool.gui: 含字体相关 _maybe_load_word_fonts/_apply_word_fonts/FontWorker"
               f" + 可编辑下拉框(Editable/Completer/CompletionMode/FilterMode/Model) -> {has_new}; "
               f"中西文字体双下拉框 -> {has_split_ui}; "
-              f"防去除加固(平铺/冗余) -> {has_harden}; 系统托盘常驻 -> {has_tray}; "
+              f"防去除加固(平铺/冗余) -> {has_harden}; "
               f"v1.4.2 版式(两列等高/视频行上移) -> {has_layout42}; "
               f"v1.4.3 版式(秒退框并入左列/与加固同带) -> {has_layout43}; "
               f"v1.4.4 版式(视频框底边齐平预览框/进度条移出视频框) -> {has_layout44}; "
               f"v1.5.0 多语言界面(Polyglot UI) -> {has_i18n}")
-        if (not has_new or not has_split_ui or not has_harden or not has_tray
+        if (not has_new or not has_split_ui or not has_harden
                 or not has_layout42 or not has_layout43 or not has_layout44
                 or not has_i18n):
             ok = False
@@ -231,43 +227,22 @@ def main():
         if not has_wf or not has_alias:
             ok = False
 
-    wdog = mods.get("watermark_tool.watchdog")
-    if wdog is None:
-        print("[缺失] watermark_tool.watchdog 未在归档中找到")
-        ok = False
-    else:
-        names = collect_names(wdog)
-        consts = find_str_consts(wdog)
-        # 守护修复：输出文件被整个删除时能从原文件重建（此前只抛 Package not found 永不补回）
-        has_recreate = (any("输出文件已被删除" in c for c in consts)
-                        and "exists" in names)
-        # 按份数校验：水印被删掉一部分也要整体补齐
-        has_count_check = (any("部分移除" in c for c in consts)
-                           and "_reinsert" in names and "watermark_count" in names)
-        print(f"watermark_tool.watchdog: 输出文件被删除后自动重建 -> {has_recreate}; "
-              f"按份数校验并补齐 -> {has_count_check}")
-        if not has_recreate or not has_count_check:
-            ok = False
-
-    # 关闭流程（v1.1.7）：点关闭 = 关闭页面不退出后台，不再弹询问框：
-    # - _go_background（隐藏窗口保留进程）必须存在，旧的 _ask_close_choice 询问框必须移除；
-    # - 一键插入/清除完成必须弹「任务已完成」；
-    # - main() 关掉 quitOnLastWindowClosed + 显式 quit，避免隐藏窗口被当成退出；
-    # - 托盘初始化失败不再静默吞掉。
+    # 关闭流程（守护/托盘移除后）：点关闭 = 直接退出程序，无后台驻留、无托盘。
+    # - “任务已完成”弹窗必须存在（_on_result 的提示文案）；
+    # - WM_CLOSE_CHOICE=cancel 自动化开关必须存在（用于跳过真正退出，便于测试）；
+    # - 旧的“后台驻留/托盘”相关符号必须都已移除：_go_background / setQuitOnLastWindowClosed / _tray_reason / _tray_tried。
     names_gui = collect_names(gui) if gui is not None else set()
     consts_gui = find_str_consts(gui) if gui is not None else []
-    has_close_background = ("_go_background" in names_gui
-                            and "_ask_close_choice" not in names_gui
-                            and any("任务已完成" in c for c in consts_gui))
+    has_done_popup = any("任务已完成" in c for c in consts_gui)
     has_env_override = any("WM_CLOSE_CHOICE" in c for c in consts_gui)
-    # co_names 里是属性名，"(False)" 参数不会作为字符串常量出现
-    has_no_autoclose = "setQuitOnLastWindowClosed" in names_gui
-    has_tray_debug = ("_tray_reason" in names_gui and "_tray_tried" in names_gui)
-    print(f"watermark_tool.gui: 关闭页面不退出后台(无询问框+完成弹窗) -> {has_close_background}; "
-          f"WM_CLOSE_CHOICE 自动化开关 -> {has_env_override}; "
-          f"main() 禁用 quitOnLastWindowClosed -> {has_no_autoclose}; "
-          f"托盘失败原因可见(_tray_reason) -> {has_tray_debug}")
-    if not (has_close_background and has_env_override and has_no_autoclose and has_tray_debug):
+    gone_background = ("_go_background" not in names_gui
+                       and "setQuitOnLastWindowClosed" not in names_gui
+                       and "_tray_reason" not in names_gui
+                       and "_tray_tried" not in names_gui)
+    print(f"watermark_tool.gui: 关闭=退出(无后台/托盘) -> {gone_background}; "
+          f"任务完成弹窗 -> {has_done_popup}; "
+          f"WM_CLOSE_CHOICE 自动化开关 -> {has_env_override}")
+    if not (has_done_popup and has_env_override and gone_background):
         ok = False
 
     # 幽灵 Word 修复（v1.1.2）：收尾模块必须一起打进去，且字体来源要过滤 @ 竖排变体

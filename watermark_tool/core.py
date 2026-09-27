@@ -93,15 +93,21 @@ def insert_watermark(src_path: str, kinds, output_path: str = None,
     - output_path 为 None：默认输出到桌面/<原名>WaterMark<ext>。
     - 若 output_path 与源文件相同：自动加后缀，避免覆盖原文件。
     - preserve_existing=True：当 output_path 已存在时不从源文件覆盖，而是先在现有
-      副本上清除本工具写入的水印图形（不动正文），再重新写入——用于后台守护“补回”
-      场景，避免覆盖用户在输出文件上的正文修改。
+      副本上清除本工具写入的水印图形（不动正文），再重新写入——保留用户在输出
+      文件上的正文/表格/图片修改（例如用户改过 output 后再次插入水印时只补水印、
+      不覆盖原文）。
     - 返回 dict 内含 "output" 字段，标明实际写出位置。
     """
     src_path = os.path.abspath(src_path)
-    _ensure_not_locked(src_path)
     if output_path is None:
         output_path = default_output_path(src_path)
     output_path = os.path.abspath(_protect_original(src_path, output_path))
+    # 本次是否「复用已有 output」：不读 source、也不从 source 复制，只在现有 output 上动。
+    # 由此可以省掉 source 的占用检查——否则用户在 Word/WPS 里打开 source 时，
+    # 守护的补回（本来就只操作 output）会被误报成“文件正被占用”而整体失败。
+    reuse_existing = bool(preserve_existing and os.path.exists(output_path))
+    if not reuse_existing:
+        _ensure_not_locked(src_path)
     _ensure_not_locked(output_path)
     out_dir = os.path.dirname(output_path)
     if out_dir and not os.path.isdir(out_dir):
@@ -110,16 +116,20 @@ def insert_watermark(src_path: str, kinds, output_path: str = None,
     if _use_com(src_path):
         if not com_available():
             raise RuntimeError("处理 .doc 需要本机安装 Microsoft Word。")
-        if preserve_existing and output_path and os.path.exists(output_path):
+        if reuse_existing:
             # 守护补回：在现有输出上先清后插，保留正文修改（.doc 仅 Windows+Word 可用）
             engine_com.clear_watermark(output_path, output_path=output_path)
             res = engine_com.insert_watermark(output_path, kinds, output_path=output_path, **opts)
         else:
             res = engine_com.insert_watermark(src_path, kinds, output_path=output_path, **opts)
     else:
-        if preserve_existing and output_path and os.path.exists(output_path):
-            # 守护补回：在现有输出上先清后插，保留正文修改（只清本工具的水印图形）
-            engine_docx.clear_watermark(output_path)
+        if reuse_existing:
+            # 守护补回：在现有输出上先清后插，保留正文修改。
+            # 这里的「先清」必须只清**本工具自己**写的图形（kinds 限定），
+            # 不能用 clear_watermark(output_path) 的默认全清语义——那会连带删掉
+            # 用户在页眉/页脚里自己的、衬于文字下方(behindDoc)的图形，
+            # 与“保留用户修改”的目的相反。
+            engine_docx.clear_watermark(output_path, kinds=list(kinds))
             res = engine_docx.insert_watermark(output_path, kinds, **opts)
         else:
             shutil.copy2(src_path, output_path)  # 保留原文件，在新副本上加水印
