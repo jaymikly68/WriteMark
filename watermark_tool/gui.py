@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLineEdit, QPushButton, QLabel, QFileDialog, QComboBox, QCompleter,
     QDoubleSpinBox, QCheckBox, QSlider, QTextEdit, QColorDialog, QMessageBox,
-    QScrollArea, QSystemTrayIcon, QMenu, QStyle, QProgressBar,
+    QScrollArea, QProgressBar,
     QButtonGroup, QRadioButton, QSizePolicy,
 )
 from PySide6.QtCore import (Qt, QObject, QThread, Signal, QTimer, QStringListModel,

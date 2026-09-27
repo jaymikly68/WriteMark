@@ -112,20 +112,7 @@ def run_once(exe, first_run, choice="quit"):
     print(f"当前本程序进程：{[(p, k) for p, _, k in procs]}")
     assert apps, "找不到运行体进程"
 
-    if choice == "minimize":
-        win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
-        time.sleep(2.0)
-        still = [p for p in app_pids() if p[2] == "app"]
-        hidden = not win32gui.IsWindowVisible(hwnd)
-        print(f"选“最小化到后台”：窗口已隐藏={hidden}，进程仍在={bool(still)}")
-        ok = hidden and bool(still)
-        # 收尾：真退出（直接结束进程，避免影响后续用例）
-        for pid, _, _ in still:
-            subprocess.run(["taskkill", "/PID", str(pid), "/F"],
-                           capture_output=True)
-        print("判定：", "通过 ✅" if ok else "失败 ❌")
-        return ok
-
+    # 关闭窗口 = 退出程序（水印守护移除后不再后台驻留/最小化到托盘）
     t_close = time.time()
     win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
     gone, dt_close = wait_for(lambda: not [p for p in app_pids() if p[2] == "app"],
@@ -145,8 +132,9 @@ def run_once(exe, first_run, choice="quit"):
 
 
 def main():
-    here = os.path.dirname(os.path.abspath(__file__))
-    exe = os.path.join(here, "dist", "WordWatermark.exe")
+    # exe 在项目根 dist/ 下（tools/ 只是脚本目录，不能拿它当根拼路径）
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    exe = os.path.join(root, "dist", "WordWatermark.exe")
     if not os.path.exists(exe):
         print("找不到", exe)
         sys.exit(1)
@@ -163,9 +151,8 @@ def main():
 
     first = not os.path.isdir(os.path.join(runtime_root(), VERSION))
     results = [
-        run_once(exe, first, "quit"),        # 首次（含解压）→ 选退出程序
-        run_once(exe, False, "quit"),        # 二次 → 选退出程序
-        run_once(exe, False, "minimize"),    # 选最小化到后台 → 窗口隐藏、进程保留
+        run_once(exe, first, "quit"),        # 首次（含解压）→ 关窗即退出
+        run_once(exe, False, "quit"),        # 二次 → 关窗即退出
     ]
 
     runtime_path = os.path.join(runtime_root(), VERSION, APP_EXE_NAME)
