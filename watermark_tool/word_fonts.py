@@ -380,14 +380,14 @@ def get_word_fonts() -> list[str] | None:
     word = None
     created = False
     try:
-        try:
-            # 优先连已运行的 Word，避免额外启动一个实例
-            word = win32com.client.GetActiveObject("Word.Application")
-        except Exception:
-            word = win32com.client.Dispatch("Word.Application")
-            word.Visible = False
-            word.DisplayAlerts = False
-            created = True
+        # 一律新建独立的隐形实例，**绝不 GetActiveObject 借用用户正在使用的 Word**：
+        # 借用会让用户正开着的文档窗口突然卡一下/闪一下（用户感知为“幽灵 Word”。
+        # 实测录屏里字体读取弹窗出现时用户正开着 水印.docx）。独立实例用完即被
+        # com_cleanup 收走，不会留下后台进程。
+        word = win32com.client.Dispatch("Word.Application")
+        word.Visible = False
+        word.DisplayAlerts = False
+        created = True
         names = word.FontNames
         fonts = [str(n) for n in names]
         return fonts

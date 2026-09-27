@@ -109,7 +109,7 @@ def render_preview(opts: dict, kinds, page_w=A4_W_PX, page_h=A4_H_PX) -> Image.I
         image_path = image_opts.get("image_path")
         if not image_path:
             raise ValueError("未选择水印图片")
-        wm = prepare_image_png(image_path, alpha)
+        wm = prepare_image_png(image_path, alpha, int(image_opts.get("pdf_page", 1)))
         _draw_layer(page, wm, angle, scale, 0.6, page_w, page_h, offset_x, offset_y,
                     tile=tile, tile_rows=tile_rows, tile_cols=tile_cols)
 

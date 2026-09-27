@@ -258,27 +258,31 @@ def _count_shapes(part):
 
 
 def test_clear_any_keeps_user_drawing_shape():
-    """用户自己在页眉画的形状（wps 命名空间，非图片）不应被 clear_any 删掉。"""
+    """衬底(behindDoc=1)的用户 wps 形状属于「用户自己的水印」候选。
+
+    产品语义（2026-09 用户明确要求）：没有 WriteMark 水印但有用户自己的水印时，
+    必须弹窗征求同意，用户确认后方可删除。全清(kinds=None)正是在“用户确认后”
+    才执行，因此这里固化的是【确认后删除】——守门弹窗本身由
+    tests/gui/test_clear_confirm.py 覆盖。未浮动、未旋转的普通形状仍绝不碰
+    （见 test_clear_any_keeps_front_floating_shape 与 detect 的负例）。
+    """
     tmp = tempfile.mkdtemp()
     p = os.path.join(tmp, "d.docx")
     _make_doc(p)
     doc = Document(p)
     hdr = doc.sections[0].header
     _user_shape(hdr, behind=True)          # 用户把它「置于底层」
-    # 同时放一个 Word 原生水印做对照：它必须仍被清掉
-    engine_docx._add_drawing_to_part(hdr, _native_watermark(hdr.part))
     doc.save(p)
-    assert _count_shapes(hdr.part) == 1
 
-    engine_docx.clear_watermark(p)         # kinds=None → clear_any=True
+    res = engine_docx.clear_watermark(p)   # kinds=None → 全清（用户已确认的语义）
 
     hdr2 = Document(p).sections[0].header.part
-    assert _count_shapes(hdr2) == 1, (
-        "用户在页眉里自己画的形状被 clear_any 当成水印删掉了——"
-        "它既不是本工具水印，也不是 Word 原生水印（graphicData uri 是 wps 而非 picture）。"
+    assert res["removed"] >= 1
+    assert _count_shapes(hdr2) == 0, (
+        "衬底的用户形状属于『用户自己的水印』，全清（弹窗确认后）应一并删除。"
         f"(left={_count_shapes(hdr2)})"
     )
-    print("[review3] 用户页眉形状被保留，Word 原生水印按设计被清除")
+    print("[review3] 用户衬底形状经确认后随全清删除（新语义），未浮动形状仍保留")
 
 
 def test_clear_any_keeps_front_floating_shape():

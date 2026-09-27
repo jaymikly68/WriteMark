@@ -480,15 +480,20 @@ def test_gui_video_run_button_clicked(monkeypatch):
     ss = w.v_run_btn.styleSheet()
     assert "#1a73e8" in ss and "color:#000" in ss, f"「开始加水印」应为蓝底黑字，实际样式: {ss}"
 
+    # 构建时即生成示意预览帧：否则 _v_last_frame 为空，改 per-type 播放方式等参数
+    # 时预览不会重绘，用户会误以为“分别自定义播放方式”在预览里失效。
+    assert getattr(w, "_v_last_frame", None) is not None, "构建后预览帧应已就绪（_v_last_frame 非空）"
+
     w.v_src_edit.setText(src)
     w.v_out_edit.setText(out)
     w.v_text_chk.setChecked(True)
     w.v_img_chk.setChecked(False)
 
-    # 播放方式三选一必须齐备，且默认“固定”
-    assert w.v_motion_fixed.text() == "固定" and w.v_motion_scroll.text() == "滚动" \
-        and w.v_motion_both.text() == "固定+滚动"
-    assert w.v_motion_fixed.isChecked(), "默认播放方式应为「固定」"
+    # 播放方式：文字/图片各自独立下拉，三选一齐备，且默认“固定”
+    for combo in (w.v_text_motion_combo, w.v_img_motion_combo):
+        items = [combo.itemText(i) for i in range(combo.count())]
+        assert items == ["固定", "滚动", "固定+滚动"], f"播放方式选项应为三选一，实际 {items}"
+        assert combo.currentText() == "固定", "per-type 播放方式默认应为「固定」"
 
     import time
     w._v_run()          # 直接走槽函数入口（含异常兜底）
@@ -508,18 +513,15 @@ def test_gui_video_run_button_clicked(monkeypatch):
 
 
 def test_gui_motion_and_kind_matrix():
-    """GUI 侧：播放方式三选一 + 文字/图片类型搭配，_v_gather_opts 必须如实反映。"""
-    from watermark_tool.gui import App, _V_MOTION_MAP
+    """GUI 侧：文字/图片各自独立的播放方式下拉，_v_gather_opts 必须如实反映。
+
+    2026-09-27 起已移除“全局播放方式”单选与“跟随”选项：每个类型单独选，
+    二者完全独立、互不牵连。
+    """
+    from watermark_tool.gui import App
 
     app = QApplication.instance() or QApplication([])
     w = App()
-
-    def pick(label):
-        for rb in (w.v_motion_fixed, w.v_motion_scroll, w.v_motion_both):
-            if rb.text() == label:
-                rb.setChecked(True)
-                return
-        raise AssertionError(f"找不到播放方式按钮：{label}")
 
     img = os.path.join(tempfile.mkdtemp(), "wm.png")
     Image.new("RGBA", (40, 40), (0, 0, 255, 200)).save(img)
@@ -528,23 +530,26 @@ def test_gui_motion_and_kind_matrix():
     w.v_img_chk.setChecked(True)
     w.v_img_edit.setText(img)
 
-    for label, expect in (("固定", "fixed"), ("滚动", "scroll"), ("固定+滚动", "both")):
-        pick(label)
+    # 每个 per-type 下拉独立设置，gather 后逐类型 motion 必须与各自选择一致
+    for text_label, img_label, t_exp, i_exp in (
+        ("固定", "固定", "fixed", "fixed"),
+        ("滚动", "滚动", "scroll", "scroll"),
+        ("固定+滚动", "固定+滚动", "both", "both"),
+    ):
+        w.v_text_motion_combo.setCurrentText(text_label)
+        w.v_img_motion_combo.setCurrentText(img_label)
         opts = w._v_gather_opts()
-        assert opts["motion"] == expect, f"全局{label} -> {opts['motion']}，期望 {expect}"
-        # 两个下拉默认“跟随”，所以逐类型的 motion 也应是同一个值
-        assert opts["text"]["motion"] == expect, label
-        assert opts["image"]["motion"] == expect, label
-    # 只有滚动生效时，滚动速度才被保留；纯固定时应归零（引擎侧会有兜底）
-    pick("固定")
+        assert opts["text"]["motion"] == t_exp, (text_label, opts["text"]["motion"])
+        assert opts["image"]["motion"] == i_exp, (img_label, opts["image"]["motion"])
+    # 两种都纯固定时，滚动速度归零（引擎侧会兜底）
+    w.v_text_motion_combo.setCurrentText("固定")
+    w.v_img_motion_combo.setCurrentText("固定")
     assert w._v_gather_opts()["scroll_speed"] == 0, "纯固定模式下滚动速度应为 0"
 
-    # 逐类型覆盖：文字固定 / 图片滚动（与全局“固定+滚动”并存也不冲突）
-    pick("固定+滚动")
+    # 逐类型自由搭配：文字固定 / 图片滚动（与各自独立选择不冲突）
     w.v_text_motion_combo.setCurrentText("固定")
     w.v_img_motion_combo.setCurrentText("滚动")
     opts = w._v_gather_opts()
-    assert opts["motion"] == "both", "全局仍应是 fixed+scroll"
     assert opts["text"]["motion"] == "fixed"
     assert opts["image"]["motion"] == "scroll"
     # 位置各自独立，避免同时固定时完全重叠
@@ -561,7 +566,9 @@ def test_gui_motion_and_kind_matrix():
     # 一个都不勾选时应被 _v_run_inner 拦住
     w.v_text_chk.setChecked(False)
     assert w._v_gather_opts()["kinds"] == []
-    assert _V_MOTION_MAP["固定+滚动"] == "both"
+    # 播放方式枚举可达（默认值已在 test_gui_video_run 中校验）
+    assert "固定+滚动" in [w.v_text_motion_combo.itemText(i)
+                            for i in range(w.v_text_motion_combo.count())]
     print("GUI 播放方式 x 水印类型 搭配 PASS")
 
 

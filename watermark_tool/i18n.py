@@ -191,8 +191,6 @@ T["en"] = {
     "大小:": "Size:",
     "透明度:": "Opacity:",
     "图片水印": "Image watermark",
-    "支持格式：png、jpg、jpeg、webp、pdf（PDF 仅取首页）":
-        "Supported: png, jpg, jpeg, webp, pdf (PDF uses the first page only)",
     # ---- 防去除加固 ----
     "平铺满页水印（覆盖整页，难以抹除）": "Tile across the page (covers the page, hard to remove)",
     "平铺行列:": "Tile rows/cols:",
@@ -409,8 +407,6 @@ T["zh-TW"] = {
     "大小:": "大小:",
     "透明度:": "透明度:",
     "图片水印": "圖片浮水印",
-    "支持格式：png、jpg、jpeg、webp、pdf（PDF 仅取首页）":
-        "支援格式：png、jpg、jpeg、webp、pdf（PDF 僅取首頁）",
     "平铺满页水印（覆盖整页，难以抹除）": "平鋪滿頁浮水印（覆蓋整頁，難以抹除）",
     "平铺行列:": "平鋪行列:",
     "× 列": "× 欄",
@@ -596,8 +592,6 @@ T["ja"] = {
     "大小:": "大きさ:",
     "透明度:": "不透明度:",
     "图片水印": "画像",
-    "支持格式：png、jpg、jpeg、webp、pdf（PDF 仅取首页）":
-        "対応形式：png、jpg、jpeg、webp、pdf（PDF は先頭ページのみ）",
     "平铺满页水印（覆盖整页，难以抹除）": "ページ全体にタイル配置（消しにくい）",
     "平铺行列:": "タイル行/列:",
     "× 列": "× 列",
@@ -795,8 +789,6 @@ T["ko"] = {
     "大小:": "크기:",
     "透明度:": "불투명도:",
     "图片水印": "이미지",
-    "支持格式：png、jpg、jpeg、webp、pdf（PDF 仅取首页）":
-        "지원 형식: png, jpg, jpeg, webp, pdf(PDF는 첫 페이지만)",
     "平铺满页水印（覆盖整页，难以抹除）": "페이지 전체 타일 배치(전체를 덮어 지우기 어려움)",
     "平铺行列:": "타일 행/열:",
     "× 列": "× 열",
@@ -995,8 +987,6 @@ T["ru"] = {
     "大小:": "Размер:",
     "透明度:": "Непрозрачность:",
     "图片水印": "Изображение",
-    "支持格式：png、jpg、jpeg、webp、pdf（PDF 仅取首页）":
-        "Поддерживаются: png, jpg, jpeg, webp, pdf (для PDF — только первая страница)",
     "平铺满页水印（覆盖整页，难以抹除）":
         "Размножить по всей странице (покрывает лист, трудно удалить)",
     "平铺行列:": "Строк/столбцов:",
@@ -1208,8 +1198,6 @@ T["de"] = {
     "大小:": "Größe:",
     "透明度:": "Deckkraft:",
     "图片水印": "Bild",
-    "支持格式：png、jpg、jpeg、webp、pdf（PDF 仅取首页）":
-        "Unterstützt: png, jpg, jpeg, webp, pdf (bei PDF nur die erste Seite)",
     "平铺满页水印（覆盖整页，难以抹除）":
         "Ganzseitig kacheln (deckt die Seite ab, schwer entfernbar)",
     "平铺行列:": "Kacheln Zeilen/Spalten:",
@@ -1428,8 +1416,6 @@ T["fr"] = {
     "大小:": "Taille :",
     "透明度:": "Opacité :",
     "图片水印": "Image",
-    "支持格式：png、jpg、jpeg、webp、pdf（PDF 仅取首页）":
-        "Formats : png, jpg, jpeg, webp, pdf (PDF : première page seulement)",
     "平铺满页水印（覆盖整页，难以抹除）":
         "Pavage sur toute la page (couvre la page, difficile à effacer)",
     "平铺行列:": "Lignes/colonnes :",

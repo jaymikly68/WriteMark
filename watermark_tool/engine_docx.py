@@ -31,6 +31,12 @@ WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
 A = "http://schemas.openxmlformats.org/drawingml/2006/main"
 PIC = "http://schemas.openxmlformats.org/drawingml/2006/picture"
 R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+# mc:AlternateContent（同一图形的“新/旧两份编码”容器）与 VML（旧编码本体）
+MC = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+VML = "urn:schemas-microsoft-com:vml"
+WPS_URI = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+_AC_TAG = "{%s}AlternateContent" % MC
+_PICT_TAG = qn("w:pict")
 
 EMU_PER_INCH = 914400
 EMU_PER_PT = 12700
@@ -292,21 +298,23 @@ def render_text_png(text: str, font_size: int, color, alpha: int,
     return img
 
 
-def prepare_image_png(path: str, alpha: int) -> Image.Image:
+def prepare_image_png(path: str, alpha: int, page: int = 1) -> Image.Image:
     """打开用户图片并整体乘以目标透明度，返回 RGBA 图像。
 
     支持 png / jpg / jpeg / bmp / gif / webp 等常见位图；
-    若传入 .pdf，则用 PyMuPDF 渲染首页为位图（仅首页），再按透明度处理。
+    若传入 .pdf，则用 PyMuPDF 渲染指定页为位图（page 为 1-based，越界自动夹取到
+    有效范围），再按透明度处理——因此多页 PDF 可任选一页当作图片水印使用。
     """
     ext = os.path.splitext(path)[1].lower()
     if ext == ".pdf":
         import pymupdf  # PyMuPDF（已在 spec hiddenimports 中声明，保证打进包）
         doc = pymupdf.open(path)
         try:
-            page = doc.load_page(0)                  # 只取首页
+            idx = max(0, min(int(page) - 1, doc.page_count - 1))  # 1-based→0-based，越界夹取
+            pg = doc.load_page(idx)
             # 以 200dpi 渲染，保证插入 Word 后的清晰度
             zoom = max(1.0, 200.0 / 72.0)
-            pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=True)
+            pix = pg.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=True)
             img = Image.frombytes("RGBA", (pix.width, pix.height), pix.samples)
         finally:
             doc.close()
@@ -478,37 +486,138 @@ def _mark_of(drawing):
 def _is_picture(drawing) -> bool:
     """图形是否为「图片」类（a:graphicData/@uri == drawingml/2006/picture）。
 
-    clear_any 的收窄条件：只有**图片**才允许凭“衬于文字下方 (behindDoc=1)”
-    这条结构特征被推定为水印。Word 原生水印本身就是图片，所以照旧会被清掉；
-    但用户在页眉里自己画的形状（Word 存成 mc:AlternateContent + wps:wsp，
-    uri 是 wordprocessingShape 而非 picture）或图表并不是水印，不该被连带删掉。
+    历史上 clear_any 用它收窄“只凭 behindDoc=1 删图片”；现在原生水印/用户自制
+    水印的判定已统一并入 _is_native_wm_block（覆盖 shape/textbox/VML），
+    本函数仅供诊断与测试使用。
     """
     gd = drawing.find(".//" + qn("a:graphicData"))
     return gd is not None and gd.get("uri") == PIC
 
 
-def _remove_in_part(part, name=None, clear_any=False):
-    """移除页眉/页脚中的水印图形。
+def _block_mark(block):
+    """顶层图形块内任一 drawing 上的本工具私有标记；没有则 None。"""
+    for d in block.iter(qn("w:drawing")):
+        m = _mark_of(d)
+        if m is not None:
+            return m
+    return None
 
-    - name 给定时：仅删除该标记的图形（插入前“替换”用）。
-    - name 为 None 且 clear_any=False：删除所有本工具标记的水印（插入前“替换”用）。
-    - name 为 None 且 clear_any=True：删除本工具标记的水印 **以及** 任何“衬于文字下方”
-      (behindDoc=1) 的**图片**图形——这样能清掉 Word 原生水印或其它工具留下的水印，
-      满足“去掉原本就有水印的 Word”的需求。仅限图片是为了不去动用户自己画
-      的形状（见 _is_picture）。
+
+def _is_native_wm_block(block) -> bool:
+    """块是否为「非本工具的水印图形」（Word 原生水印 / 用户自制页眉水印）。
+
+    带**任一**特征即命中（前提：块内没有本工具私有标记）：
+    - DrawingML：wp:anchor/@behindDoc == "1" —— 衬于文字下方的浮动图形。
+      Word 内置“机密”水印、用户自制的衬底文本框（旋转半透明文字）、
+      衬底图片都属于这一类（典型结构：mc:AlternateContent 包裹的
+      wordprocessingShape 文本框 + behindDoc=1）；
+    - 旋转的浮动图形：a:xfrm/@rot 非 0（DrawingML）或 v:shape/@style 含
+      非零 rotation（VML）。水印为斜排几乎必带旋转（-45°/-30°等），
+      页眉页脚里的正常内容（logo、页码、单位名）不会转 45° 摆着。
+      实测案例：用户手工平铺的水印文本框大多 behindDoc=0，但全部
+      rotation:-45 —— 仅靠 behindDoc 会漏掉 10/11；
+    - VML：v:shape/@style 含 position:absolute 且负 z-index
+      —— 老式 Word 对“衬于文字下方”的等价表示；
+    - VML v:textpath —— Word 内置水印专用的文字路径（沿路径排字），
+      用户正常内容几乎不会使用。
+
+    判定范围与 clear_watermark(kinds=None) 的实际删除范围**保持一致**，
+    因此 GUI 守门用它决定“要不要弹窗问用户”不会放跑任何将被删除的对象；
+    反过来，正文、行内图、非浮动且未旋转的页眉内容一律不命中，不会误伤。
+    旋转特征命中时守门同样会先弹窗，用户确认后才删——宁可多问，不可错删。
+    """
+    if _block_mark(block) is not None:
+        return False
+    floating = False
+    for anchor in block.iter(qn("wp:anchor")):
+        floating = True
+        if anchor.get("behindDoc") == "1":
+            return True
+    if floating:
+        for xfrm in block.iter(qn("a:xfrm")):
+            rot = xfrm.get("rot")
+            try:
+                if rot and int(rot) != 0:
+                    return True
+            except (TypeError, ValueError):
+                pass
+    for shape in block.iter("{%s}shape" % VML):
+        style = (shape.get("style") or "").replace(" ", "")
+        if "position:absolute" in style:
+            if "z-index:-" in style:
+                return True
+            if "rotation:" in style and not style.endswith("rotation:0"):
+                seg = style.split("rotation:", 1)[1].split(";", 1)[0]
+                try:
+                    if float(seg.rstrip("%pt")) != 0:
+                        return True
+                except ValueError:
+                    return True
+    for _ in block.iter("{%s}textpath" % VML):
+        return True
+    return False
+
+
+def _detach_block(block):
+    """从文档中整块移除一个顶层图形块（AlternateContent / w:pict / w:drawing）。
+
+    与 _detach_drawing 相同的安全约束：块所在的 run 若还残留用户内容
+    （w:t 等）必须保留，仅在 run 剥空后才连带移除。
+    """
+    parent = block.getparent()
+    if parent is None:
+        return
+    parent.remove(block)
+    if parent.tag == qn("w:r") and len(parent) == 0 and parent.getparent() is not None:
+        parent.getparent().remove(parent)
+
+
+def _top_graphic_blocks(root):
+    """收集 root 里的「顶层图形块」，三类：mc:AlternateContent / w:pict / w:drawing。
+
+    Word 对较新的图形用 mc:AlternateContent 包两层：mc:Choice 放 DrawingML、
+    mc:Fallback 放 VML —— 两份是**同一图形的两个编码**。因此必须整块处理：
+    若只删 Choice 里的 w:drawing，Fallback 的 VML 仍在，Word 照样把水印渲染
+    出来（这正是早期版本“清了却清不掉”Word 原生水印的直接原因）。
+
+    嵌套在 AlternateContent / w:pict 内部的子图形不单列，由外层块统一代表。
+    """
+    out = []
+    for el in root.iter():
+        if el.tag not in (_AC_TAG, _PICT_TAG, qn("w:drawing")):
+            continue
+        anc = el.getparent()
+        nested = False
+        while anc is not None:
+            if anc.tag in (_AC_TAG, _PICT_TAG):
+                nested = True
+                break
+            anc = anc.getparent()
+        if not nested:
+            out.append(el)
+    return out
+
+
+def _remove_in_part(part, name=None, clear_any=False):
+    """移除页眉/页脚中的水印图形（按顶层图形块整块删除）。
+
+    - name 给定时：仅删除该标记的图形块（插入前“替换”用）。
+    - name 为 None 且 clear_any=False：删除所有本工具标记的水印块。
+    - name 为 None 且 clear_any=True：额外删除「非本工具的水印块」
+      （判定见 _is_native_wm_block）——覆盖 Word 原生水印、用户自制的
+      衬底文本框/图片、老式 VML 浮动水印。GUI 侧在执行 clear_any 前会
+      弹窗征求用户同意，因此这个删除范围是“经用户确认”的。
     """
     root = part._element
     removed = 0
-    for drawing in list(root.iter(qn("w:drawing"))):
-        anchor = drawing.find(".//" + qn("wp:anchor"))
-        behind = anchor is not None and anchor.get("behindDoc") == "1"
-        mark = _mark_of(drawing)
+    for block in _top_graphic_blocks(root):
+        mark = _block_mark(block)
         if name is not None:
             if mark == name:
-                _detach_drawing(drawing)
+                _detach_block(block)
                 removed += 1
-        elif mark is not None or (clear_any and behind and _is_picture(drawing)):
-            _detach_drawing(drawing)
+        elif mark is not None or (clear_any and _is_native_wm_block(block)):
+            _detach_block(block)
             removed += 1
     return removed
 
@@ -618,7 +727,7 @@ def insert_watermark(path: str, kinds, **opts) -> dict:
         image_path = image_opts.get("image_path")
         if not image_path or not os.path.exists(image_path):
             raise FileNotFoundError(f"图片不存在: {image_path}")
-        img = prepare_image_png(image_path, alpha)
+        img = prepare_image_png(image_path, alpha, int(image_opts.get("pdf_page", 1)))
         prepared.append((MARK_IMG, img, 0.6, angle, scale, offset_x, offset_y))
 
     if not prepared:
@@ -693,6 +802,26 @@ def detect_watermark_types(path: str) -> set:
     return found
 
 
+def detect_native_watermark(path: str) -> bool:
+    """检测文档里是否存在「Word 原生水印」（或其它工具/用户自制的水印）。
+
+    判定与 clear_watermark(kinds=None)（clear_any）的**实际删除范围一致**：
+    页眉/页脚里不带本工具标记、且满足 _is_native_wm_block 的顶层图形块——
+    衬于文字下方(behindDoc=1)的浮动图形（图片或文本框形状）、负 z-index 的
+    VML 浮动图形、v:textpath 内置水印。守门据此弹窗征求用户同意，命中即
+    “确认后会被删掉的对象”，不会放跑、也不会夸大。
+
+    正文、行内图、非衬底的页眉内容不命中。
+    """
+    document = Document(path)
+    for section in document.sections:
+        for part in _iter_parts(document, section, include_footers=True):
+            for block in _top_graphic_blocks(part._element):
+                if _is_native_wm_block(block):
+                    return True
+    return False
+
+
 def clear_watermark(path: str, kinds: list = None) -> dict:
     """清除 .docx 中的水印。
 
@@ -719,14 +848,18 @@ def clear_watermark(path: str, kinds: list = None) -> dict:
             if part.part in processed_parts:
                 continue
             processed_parts.add(part.part)
-            if only_kinds:
-                # 仅按类型删除：只删 mark 命中 kinds 的图形，绝不碰原生水印
-                for drawing in list(part._element.iter(qn("w:drawing"))):
-                    if _mark_of(drawing) in kind_marks:
-                        _detach_drawing(drawing)
+            # 一律按顶层图形块整块删除：本工具水印虽不经过 AlternateContent，
+            # 但按块删可同时清掉可能存在的 Fallback 编码，行为更干净统一
+            for block in _top_graphic_blocks(part._element):
+                mark = _block_mark(block)
+                if only_kinds:
+                    # 仅按类型删除：只删 mark 命中 kinds 的块，绝不碰原生水印
+                    if mark in kind_marks:
+                        _detach_block(block)
                         removed += 1
-            else:
-                removed += _remove_in_part(part, clear_any=True)  # 清掉所有水印类图形
+                elif mark is not None or _is_native_wm_block(block):
+                    _detach_block(block)
+                    removed += 1
     document.save(path)
     return {"ok": True, "engine": "docx", "removed": removed, "kinds": sorted(kinds)}
 

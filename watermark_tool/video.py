@@ -103,12 +103,37 @@ def _build_image_layer(image_path: str, frame_w: int, frame_h: int, cfg: dict) -
     return layer
 
 
-def _layer_specs(frame_w: int, frame_h: int, kinds: list, text_cfg: dict, image_cfg: dict):
+def _in_time_range(t_sec: float, time_range) -> bool:
+    """该时刻是否应叠加这份水印。
+
+    time_range 为 (start_sec, end_sec) 半开区间 [start, end)；
+    为 None / 空 / 非法（end<=start）时视为**不限时段**，全片生效。
+
+    用途：用户只想遮挡视频里某几秒出现的敏感信息时，可让水印只在指定时段出现，
+    其他时刻画面保持干净（见 opts['time_range']）。
+    """
+    if not time_range:
+        return True
+    try:
+        start = float(time_range[0])
+        end = float(time_range[1])
+    except Exception:
+        return True
+    if end <= start:
+        return True
+    return start <= t_sec < end
+
+
+def _layer_specs(frame_w: int, frame_h: int, kinds: list, text_cfg: dict, image_cfg: dict,
+                 default_range=None):
     """返回本帧需要叠加的所有水印图层规格。
 
-    每项为 dict：{'kind', 'img', 'position'}。
+    每项为 dict：{'kind', 'img', 'position', 'time_range'}。
     position 取自该类型自己的配置（text.position / image.position），
     因此文字与图片即使同时固定，也不会叠在同一处。
+
+    time_range 取该类型自己的配置（text_cfg/image_cfg['time_range']），
+    没有则回落到全局 default_range（opts['time_range']），便于将来做逐类型时段。
     """
     specs = []
     if "text" in kinds and (text_cfg.get("text") or "").strip():
@@ -116,6 +141,7 @@ def _layer_specs(frame_w: int, frame_h: int, kinds: list, text_cfg: dict, image_
             "kind": "text",
             "img": _build_text_layer(text_cfg["text"], frame_w, frame_h, text_cfg),
             "position": text_cfg.get("position"),
+            "time_range": text_cfg.get("time_range") or default_range,
         })
     if "image" in kinds and image_cfg.get("image_path"):
         if os.path.exists(image_cfg["image_path"]):
@@ -123,6 +149,7 @@ def _layer_specs(frame_w: int, frame_h: int, kinds: list, text_cfg: dict, image_
                 "kind": "image",
                 "img": _build_image_layer(image_cfg["image_path"], frame_w, frame_h, image_cfg),
                 "position": image_cfg.get("position"),
+                "time_range": image_cfg.get("time_range") or default_range,
             })
     return specs
 
@@ -217,6 +244,10 @@ def add_video_watermark(src: str, output: str, opts: dict,
       fps          : 输出帧率，缺省跟随源视频；与滚动速度都以时间为基准，
                      改帧率不会影响滚动节奏感。
       crf          : H.264 恒定质量（10~30，越小越清晰，默认 18）。
+      time_range   : (start, end) 秒，半开区间 [start, end)——水印**只在该时段出现**，
+                     其余时刻画面保持原样（用于遮挡某几秒才出现的敏感信息）。
+                     缺省 / None / 区间非法（end<=start）都表示全片生效。
+                     也可写进 text / image 各自的 cfg 做逐类型时段（优先级更高）。
     每个类型可用 position 单独指定锚点；缺省 (0.85, 0.85)。固定+滚动时该锚点
     既是固定副本的位置，也是滚动副本的纵向锚点。
     返回 dict 含 output / frames / engine / motion。
@@ -270,7 +301,7 @@ def add_video_watermark(src: str, output: str, opts: dict,
     need_resize = True     # 后续统一按输出尺寸规整，简单且不会漏帧
 
     # 水印图层与帧尺寸相关、但与帧内容无关：仅构造一次，循环里只换位置，省大量 CPU
-    layers = _layer_specs(W, H, kinds, text_cfg, image_cfg)
+    layers = _layer_specs(W, H, kinds, text_cfg, image_cfg, opts.get("time_range"))
     if not layers:
         raise ValueError("文字为空且未提供有效图片，无法生成水印。")
     if scroll_speed <= 0:
@@ -336,6 +367,8 @@ def add_video_watermark(src: str, output: str, opts: dict,
                 img = base.copy()            # 同一源帧可能对应多个输出帧，需各自上色
                 painted = set()   # “固定+滚动”下避免同一图层在完全相同坐标被叠加两次
                 for spec in layers:
+                    if not _in_time_range(t_sec, spec.get("time_range")):
+                        continue   # 不在生效时段：本帧保持干净，不加这份水印
                     layer = spec["img"]
                     lw, lh = layer.size
                     pos = spec.get("position")
@@ -479,8 +512,10 @@ def grab_raw_frame(src: str, opts: dict, t_sec: float = 1.0) -> Image.Image:
 def compose_on_frame(raw, opts: dict, t_sec: float = 0.0) -> Image.Image:
     """在已读取的 RGB 帧上叠加当前水印，返回带水印的 PIL RGB 图（用于实时预览）。
 
-    与 add_video_watermark 逐帧合成逻辑一致；t_sec 仅用于滚动水印在该时刻的位置，
-    因此预览里的滚动水印与实际导出在 t_sec 处的位置相同。
+    与 add_video_watermark 逐帧合成逻辑一致；t_sec 有两个用途：
+      1) 滚动水印在该时刻的位置（预览里的位置与实际导出一致）；
+      2) 判定该时刻是否落在 time_range 内——不在时段内就不叠水印，
+         所以配合预览的「时刻(秒)」可以直接验证时段设置是否正确。
     """
     rgb = raw.convert("RGBA")
     W, H = rgb.size
@@ -489,7 +524,7 @@ def compose_on_frame(raw, opts: dict, t_sec: float = 0.0) -> Image.Image:
         raise ValueError("未启用任何水印类型。")
     text_cfg = opts.get("text", {}) or {}
     image_cfg = opts.get("image", {}) or {}
-    layers = _layer_specs(W, H, kinds, text_cfg, image_cfg)
+    layers = _layer_specs(W, H, kinds, text_cfg, image_cfg, opts.get("time_range"))
     if not layers:
         raise ValueError("文字为空且未提供有效图片，无法生成水印。")
     motions = _normalize_motion(opts.get("motion", opts.get("mode", "fixed"))) or ["fixed"]
@@ -497,6 +532,8 @@ def compose_on_frame(raw, opts: dict, t_sec: float = 0.0) -> Image.Image:
     if scroll_speed <= 0:
         scroll_speed = 0.12
     for spec in layers:
+        if not _in_time_range(t_sec, spec.get("time_range")):
+            continue   # 预览与导出同一套时段判定，所见即所得
         cfg = text_cfg if spec["kind"] == "text" else image_cfg
         per_type = _normalize_motion(cfg.get("motion"))
         spec_motions = per_type or list(motions)

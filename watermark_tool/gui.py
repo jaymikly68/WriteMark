@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import io
+import re
 import tempfile
 import sys
 import threading
@@ -25,12 +26,13 @@ log = logging.getLogger(__name__)
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLineEdit, QPushButton, QLabel, QFileDialog, QComboBox, QCompleter,
-    QDoubleSpinBox, QCheckBox, QSlider, QTextEdit, QColorDialog, QMessageBox,
+    QDoubleSpinBox, QSpinBox, QCheckBox, QSlider, QTextEdit, QColorDialog, QMessageBox,
     QScrollArea, QProgressBar,
     QButtonGroup, QRadioButton, QSizePolicy,
+    QToolButton, QAbstractSpinBox, QStyle,
 )
 from PySide6.QtCore import (Qt, QObject, QThread, Signal, QTimer, QStringListModel,
-                            QEvent, QRect, QPointF, QSettings, QLocale)
+                            QEvent, QRect, QPointF, QSettings, QLocale, QSize)
 from PySide6.QtGui import (QColor, QImage, QPixmap, QIntValidator, QPainter, QPen,
                            QFont)
 
@@ -64,6 +66,36 @@ BTN_HL = (
     "QPushButton:pressed { background-color:#0b57d0; }"
 )
 
+# 次级「浏览 / 选择」类按钮：淡淡蓝底 + 深蓝边 + 深蓝字。
+# 与 BTN_HL（实蓝底主操作）同属蓝色系但明显更轻，既能一眼看出是“可点的蓝色按钮”，
+# 又不会跟主操作抢注意力（原先这些按钮是系统默认灰，与蓝色系界面不统一）。
+BTN_BLUE = (
+    "QPushButton {"
+    "  background-color:#d3e3fd; color:#0b57d0; font-weight:600;"
+    "  border:1px solid #0b57d0; border-radius:6px;"
+    "  padding:6px 12px; min-height:28px;"
+    "}"
+    "QPushButton:hover { background-color:#c2d8fb; }"
+    "QPushButton:pressed { background-color:#b3cdf8; }"
+    "QPushButton:disabled {"
+    "  background-color:#eef1f5; color:#9aa0a6; border-color:#c8ccd2;"
+    "  font-weight:400;"
+    "}"
+)
+
+# 数值框旁的 ▲/▼ 微调小按钮：替代 Qt 自带的窄箭头。
+# 自带箭头在部分 Windows 样式/宽度下，点击热区与三角形位置会错位（点上箭头却落进
+# 输入框），换成独立 QToolButton 后热区就是按钮本身，点一次必定 ±1 个步进。
+STEP_BTN = (
+    "QToolButton {"
+    "  background-color:#ffffff; border:1px solid #b6bcc6; border-radius:3px;"
+    "  padding:0px; margin:0px;"
+    "}"
+    "QToolButton:hover { background-color:#e8f0fe; border-color:#0b57d0; }"
+    "QToolButton:pressed { background-color:#c2d8fb; }"
+    "QToolButton:disabled { background-color:#f1f3f5; border-color:#d8dce1; }"
+)
+
 # 危险操作按钮：深褐底 + 红字（视频水印的「取消」），与主/次操作配色明显区分
 BTN_BROWN = (
     "QPushButton {"
@@ -78,6 +110,40 @@ BTN_BROWN = (
     "  font-weight:400;"
     "}"
 )
+
+
+# ---------------------------------------------------------------------------
+# 「生效时段」的用户填法解析：一行文本 → (起秒, 止秒)
+#
+# 用户要的就是「1.0-2.0」这种一眼能看懂的写法，而不是两个分开的微调框。
+# 这里兼容常见分隔符（-, ~, –, —, 到, 逗号, 空格, 中文顿号），别的用户怎么顺手怎么填。
+_RANGE_NUM_RE = re.compile(r"\d+(?:\.\d+)?")
+
+
+def parse_time_range(text):
+    """把「1.0-2.0」这类写法解析成 (起秒, 止秒)。
+
+    返回 None 表示「没填 / 填不出来 / 止不大于起」——调用方按“全片生效”处理。
+    例：'1.0-2.0' → (1.0, 2.0)；'第1秒到第3秒' → (1.0, 3.0)；'3.0-1.0' → None。
+    """
+    if text is None:
+        return None
+    nums = [float(x) for x in _RANGE_NUM_RE.findall(str(text))]
+    if len(nums) < 2:
+        return None            # 只有一个数字：说不清到哪里结束，按无效处理
+    a, b = nums[0], nums[1]
+    if not (b > a):
+        return None            # 止 <= 起：非法区间
+    return (round(a, 3), round(b, 3))
+
+
+def format_time_range(rng):
+    """(起, 止) → '1.0-2.0'，用于回填输入框/提示语，保持与示例一致的写法。"""
+    try:
+        a, b = float(rng[0]), float(rng[1])
+    except Exception:
+        return ""
+    return f"{a:.1f}-{b:.1f}"
 
 
 class _ProportionalButton(QPushButton):
@@ -212,14 +278,14 @@ _W_POS_PRESETS = {
 }
 _W_POS_KEYS = list(_W_POS_PRESETS.keys())
 
-# 播放方式 -> 引擎 motion 值（"跟随" 表示沿用全局单选）
+# 播放方式 -> 引擎 motion 值。文字水印与图片水印【各自独立】选择，不再设“全局单选 +
+# 跟随”机制——那样会出现三个播放方式控件、且“跟随”会掩盖 per-type 的明确设置。
 _V_MOTION_MAP = {
     "固定": "fixed",
     "滚动": "scroll",
     "固定+滚动": "both",
 }
-_V_MOTION_LABELS = ["跟随", "固定", "滚动", "固定+滚动"]
-_V_MOTION_INVERSE = {v: k for k, v in _V_MOTION_MAP.items()}
+_V_MOTION_LABELS = ["固定", "滚动", "固定+滚动"]
 
 
 def _combo_key(combo) -> str:
@@ -394,7 +460,11 @@ class VideoWorker(QThread):
 
 class _DragLabel(QLabel):
     """可拖拽定位的预览标签：在显示的图像上按下/拖动，发射归一化坐标 (fx, fy)∈[0,1]，
-    并绘制一个位置标记。供 Word 预览与视频预览帧共用，实现“拖拽自定义水印位置”。
+    并绘制位置标记。供 Word 预览与视频预览帧共用，实现“拖拽自定义水印位置”。
+
+    支持同时绘制多个标记（文字水印 / 图像水印各一个，颜色与文字标号区分），
+    这样两种水印即使位置不同也能在预览里一眼分清；拖拽时通过 setActiveMarkerKey
+    指定只移动哪一个，互不干扰，可分别拖到不同位置（无需分两次加水印）。
 
     图像按 KeepAspectRatio 居中显示，鼠标坐标会换算回图像内容占比，避免黑边干扰。
     """
@@ -405,28 +475,42 @@ class _DragLabel(QLabel):
         super().__init__(parent)
         self._base = QPixmap()
         self._img_rect = QRect()
-        self._marker = None           # QPointF（图像内归一化坐标），None 时不画
+        # 多个标记：{"fx","fy","color":(r,g,b),"label":str,"key":str}
+        self._markers = []
+        self._active_key = None      # 拖拽时只移动该 key 对应的标记；None 则整体（兼容旧行为）
         self.setMouseTracking(True)
         self.setAlignment(Qt.AlignCenter)
 
     # ---- 外部接口 ----
     def setBasePixmap(self, pix):
         self._base = pix if pix is not None else QPixmap()
-        # 换图时保留标记（拖拽过程中会重新合成，标记仍代表当前位置）
         self.update()
 
     def clearImage(self):
         self._base = QPixmap()
-        self._marker = None
+        self._markers = []
+        self.update()
+
+    def setMarkers(self, markers):
+        """设置全部标记（覆盖）。markers: 含 fx/fy/color/label/key 的字典列表。"""
+        self._markers = [dict(m) for m in markers]
+        self.update()
+
+    def clearMarkers(self):
+        self._markers = []
         self.update()
 
     def setMarker(self, fx, fy):
-        self._marker = QPointF(max(0.0, min(1.0, fx)), max(0.0, min(1.0, fy)))
-        self.update()
+        """兼容旧调用：单个红点标记（无 key）。"""
+        self.setMarkers([{"fx": fx, "fy": fy,
+                          "color": (225, 6, 0), "label": "", "key": "single"}])
 
     def clearMarker(self):
-        self._marker = None
-        self.update()
+        self.clearMarkers()
+
+    def setActiveMarkerKey(self, key):
+        """指定拖拽时只移动哪个 key 的标记（"text"/"image" 等）；None 表示整体移动。"""
+        self._active_key = key
 
     def hasImage(self):
         return not self._base.isNull()
@@ -448,15 +532,23 @@ class _DragLabel(QLabel):
         self._compute_rect()
         p = QPainter(self)
         p.drawPixmap(self._img_rect, self._base)
-        if self._marker is not None:
-            mx = self._img_rect.x() + self._marker.x() * self._img_rect.width()
-            my = self._img_rect.y() + self._marker.y() * self._img_rect.height()
+        for m in self._markers:
+            fx = max(0.0, min(1.0, m.get("fx", 0.0)))
+            fy = max(0.0, min(1.0, m.get("fy", 0.0)))
+            mx = self._img_rect.x() + fx * self._img_rect.width()
+            my = self._img_rect.y() + fy * self._img_rect.height()
             r = max(8, int(min(self._img_rect.width(), self._img_rect.height()) * 0.06))
-            pen = QPen(QColor(225, 6, 0)); pen.setWidth(3)
+            color = QColor(*m.get("color", (225, 6, 0)))
+            pen = QPen(color); pen.setWidth(3)
             p.setPen(pen)
             p.drawEllipse(QPointF(mx, my), r, r)
             p.drawLine(QPointF(mx - r, my), QPointF(mx + r, my))
             p.drawLine(QPointF(mx, my - r), QPointF(mx, my + r))
+            label = m.get("label")
+            if label:
+                p.setPen(color)
+                p.setFont(QFont("Sans", max(10, int(r * 0.5)), QFont.Bold))
+                p.drawText(QPointF(mx + r + 2, my - r), label)
         p.end()
 
     def _frac(self, pos):
@@ -466,11 +558,21 @@ class _DragLabel(QLabel):
         fy = (pos.y() - self._img_rect.y()) / self._img_rect.height()
         return max(0.0, min(1.0, fx)), max(0.0, min(1.0, fy))
 
+    def _set_active(self, fx, fy):
+        """按下/拖动时更新标记：若指定了 active key 且存在该标记，只改它；否则整体（兼容）。"""
+        if self._active_key is not None:
+            for m in self._markers:
+                if m.get("key") == self._active_key:
+                    m["fx"] = fx; m["fy"] = fy
+                    self.update()
+                    return
+        self.setMarker(fx, fy)
+
     def mousePressEvent(self, ev):
         if ev.button() == Qt.LeftButton and self.hasImage():
             f = self._frac(ev.pos())
             if f:
-                self.setMarker(*f)
+                self._set_active(*f)
                 self.dragged.emit(f[0], f[1])
         super().mousePressEvent(ev)
 
@@ -478,9 +580,30 @@ class _DragLabel(QLabel):
         if (ev.buttons() & Qt.LeftButton) and self.hasImage():
             f = self._frac(ev.pos())
             if f:
-                self.setMarker(*f)
+                self._set_active(*f)
                 self.dragged.emit(f[0], f[1])
         super().mouseMoveEvent(ev)
+
+
+class _HoverHintLabel(QLabel):
+    """可悬浮提示的短语标签：鼠标移入时显示关联的蓝色说明标签，移出时隐藏。
+
+    用于“PDF取任意页”这类需要额外解释、又不想一直占地方的短语。
+    （必须用子类覆盖 enterEvent/leaveEvent，实例属性赋值无法挂入 Qt 的事件分发。）
+    """
+
+    def __init__(self, text, helper, parent=None):
+        super().__init__(text, parent)
+        self._helper = helper
+        self.setStyleSheet(
+            "color:#e10600; font-family:'FangSong','仿宋'; font-size:11px; "
+            "text-decoration:underline; cursor:pointer;")
+
+    def enterEvent(self, ev):
+        self._helper.setVisible(True)
+
+    def leaveEvent(self, ev):
+        self._helper.setVisible(False)
 
 
 class App(QMainWindow):
@@ -612,7 +735,8 @@ class App(QMainWindow):
         h = QHBoxLayout(f_file); h.setContentsMargins(0, 0, 0, 0)
         self.file_edit = QLineEdit(); self.file_edit.setPlaceholderText("选择 Word 文件 (.docx / .doc)")
         h.addWidget(self.file_edit, 3)
-        btn = QPushButton("浏览..."); btn.clicked.connect(self._browse_file); h.addWidget(btn, 1)
+        btn = QPushButton("浏览..."); btn.setStyleSheet(BTN_BLUE)
+        btn.clicked.connect(self._browse_file); h.addWidget(btn, 1)
         vl.addWidget(f_file)
 
         # 输出文件（不破坏原文件）
@@ -621,7 +745,8 @@ class App(QMainWindow):
         ho.addWidget(QLabel("输出:"))
         self.out_edit = QLineEdit(); self.out_edit.setPlaceholderText("默认保存到桌面/<原名>WaterMark.docx，可点击浏览修改")
         ho.addWidget(self.out_edit, 3)
-        bout = QPushButton("浏览..."); bout.clicked.connect(self._browse_output); ho.addWidget(bout, 1)
+        bout = QPushButton("浏览..."); bout.setStyleSheet(BTN_BLUE)
+        bout.clicked.connect(self._browse_output); ho.addWidget(bout, 1)
         ho.addStretch(1)
         vl.addWidget(f_out)
         self.out_edit.textChanged.connect(self._on_output_changed)
@@ -717,7 +842,8 @@ class App(QMainWindow):
         vi = QVBoxLayout(); vi.setContentsMargins(16, 0, 0, 0); vi.setSpacing(6)
         row = QHBoxLayout(); row.addWidget(QLabel("图片路径:"))
         self.img_edit = QLineEdit(); row.addWidget(self.img_edit, 1)
-        b = QPushButton("选择图片..."); b.clicked.connect(self._browse_image); row.addWidget(b)
+        b = QPushButton("选择图片..."); b.setStyleSheet(BTN_BLUE)
+        b.clicked.connect(self._browse_image); row.addWidget(b)
         vi.addLayout(row)
         for w in (self.img_edit, b):
             self.img_ctrl_widgets.append(w)
@@ -754,6 +880,17 @@ class App(QMainWindow):
         row, self.img_offy_slider, self.img_offy_spin = self._make_slider_spin(
             "垂直偏移(%):", -50, 50, self.img_offset_y, 2, 1.0, "%", self._on_img_offy)
         vi.addLayout(row)
+        # PDF 页码：仅当水印图片为 PDF 时可用，用于选取任意一页作为图片水印（默认第 1 页）
+        row = QHBoxLayout(); row.addWidget(QLabel("PDF页码:"))
+        self.img_pdf_page_spin = QSpinBox()
+        self.img_pdf_page_spin.setRange(1, 9999)
+        self.img_pdf_page_spin.setValue(1)
+        self.img_pdf_page_spin.setToolTip("当水印图片为 PDF 时，选取第几页作为图片水印（默认第 1 页）")
+        self.img_pdf_page_spin.valueChanged.connect(self._schedule_preview)
+        row.addWidget(self.img_pdf_page_spin, 1)
+        vi.addLayout(row)
+        self.img_ctrl_widgets.append(self.img_pdf_page_spin)
+        self._refresh_pdf_page_state()
         for w in (self.img_pos_combo,
                   self.img_angle_slider, self.img_angle_spin,
                   self.img_trans_slider, self.img_trans_spin, self.img_scale_spin,
@@ -762,9 +899,16 @@ class App(QMainWindow):
             self.img_ctrl_widgets.append(w)
         f_img.layout().addLayout(vi)
         f_img.layout().addStretch(1)   # 底部位留白：盒高被拉到与文本水印一样高时从这里顶出
-        # 页面明示支持的图片格式（仿宋红字），让用户知晓
-        f_img.layout().addWidget(self._fmt_hint(
-            "支持格式：png、jpg、jpeg、webp、pdf（PDF 仅取首页）"))
+        # 页面明示支持的图片格式（仿宋红字），让用户知晓；其中“PDF取任意页”悬浮可见说明
+        hfmt = QHBoxLayout()
+        hfmt.addWidget(self._fmt_hint("支持格式：png、jpg、jpeg、webp、pdf，"))
+        self.img_pdf_hint, self.img_pdf_helper = self._make_hover_hint(
+            "PDF取任意页",
+            "当您使用多页 PDF 当作图片水印时，可用上方“PDF 页码”选取任意一页作为图片水印使用。",
+            f_img)
+        hfmt.addWidget(self.img_pdf_hint)
+        f_img.layout().addLayout(hfmt)
+        f_img.layout().addWidget(self.img_pdf_helper)  # 蓝字小字：悬浮“PDF取任意页”时显现
         f_img.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         # 文本/图像两列【底边平行】：行数少的图像列补到文本列高度。
         self._col_eq = _EqualBottoms(f_text, f_img)
@@ -894,6 +1038,20 @@ class App(QMainWindow):
         self.preview_drag_chk.setToolTip("勾选后，可直接在预览图上用鼠标把水印拖到任意位置；"
                                          "放开后水平/垂直偏移会同步更新。")
         vp.addWidget(self.preview_drag_chk)
+        # 拖拽定位对象：文字 / 图像，可分别把两种水印拖到不同位置（互不覆盖）
+        hp_drag = QHBoxLayout()
+        hp_drag.addWidget(QLabel("拖拽定位对象:"))
+        self.preview_drag_target_combo = QComboBox()
+        for _lb, _key in (("文字", "text"), ("图片", "image")):
+            self.preview_drag_target_combo.addItem(_lb, _key)
+        self.preview_drag_target_combo.setCurrentIndex(0)
+        self.preview_drag_target_combo.setToolTip(
+            "选择拖拽时移动哪种水印：文字或图片，互不干扰，"
+            "因此可把文字拖到一处、图片拖到另一处，无需分两次加水印。")
+        self.preview_drag_target_combo.currentIndexChanged.connect(self._on_preview_drag_target)
+        hp_drag.addWidget(self.preview_drag_target_combo)
+        hp_drag.addStretch(1)
+        vp.addLayout(hp_drag)
         hprev = QHBoxLayout()
         bp = QPushButton("预览水印"); bp.clicked.connect(self._render_preview); hprev.addWidget(bp)
         bps = QPushButton("保存预览图"); bps.clicked.connect(self._save_preview); hprev.addWidget(bps)
@@ -1008,6 +1166,7 @@ class App(QMainWindow):
         self.latin_font_combo.currentTextChanged.connect(self._schedule_preview)
         self.font_spin.valueChanged.connect(self._schedule_preview)
         self.img_edit.textChanged.connect(self._schedule_preview)
+        self.img_edit.textChanged.connect(self._refresh_pdf_page_state)
         self.text_chk.stateChanged.connect(self._schedule_preview)
         self.img_chk.stateChanged.connect(self._schedule_preview)
         # 加固参数：改动即刷新预览（平铺密度直接影响观感）
@@ -1200,7 +1359,8 @@ class App(QMainWindow):
         h1 = QHBoxLayout(f_vsrc); h1.setContentsMargins(0, 0, 0, 0)
         self.v_src_edit = QLineEdit(); self.v_src_edit.setPlaceholderText("选择视频文件（mp4 / mkv / avi / mov / wmv …）")
         h1.addWidget(self.v_src_edit, 3)
-        b1 = QPushButton("浏览..."); b1.clicked.connect(self._v_browse_src);         h1.addWidget(b1, 1)
+        b1 = QPushButton("浏览..."); b1.setStyleSheet(BTN_BLUE)
+        b1.clicked.connect(self._v_browse_src);         h1.addWidget(b1, 1)
         # Maximum：高度只跟两个控件走，不去吃掉这一列多出来的竖直空间
         f_vsrc.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         vcol.addWidget(f_vsrc, 0, Qt.AlignTop)
@@ -1209,7 +1369,8 @@ class App(QMainWindow):
         h2.addWidget(QLabel("输出:"))
         self.v_out_edit = QLineEdit(); self.v_out_edit.setPlaceholderText("默认 <原名>WaterMark.mp4，可修改")
         h2.addWidget(self.v_out_edit, 3)
-        b2 = QPushButton("浏览..."); b2.clicked.connect(self._v_browse_out);         h2.addWidget(b2, 1)
+        b2 = QPushButton("浏览..."); b2.setStyleSheet(BTN_BLUE)
+        b2.clicked.connect(self._v_browse_out);         h2.addWidget(b2, 1)
         f_vout.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         vcol.addWidget(f_vout, 0, Qt.AlignTop)
         # 组框吃掉列内剩余高度：视频框底边要与左侧「水印预览」框底边齐平，
@@ -1222,12 +1383,14 @@ class App(QMainWindow):
         ht = QHBoxLayout()
         self.v_text_chk = QCheckBox("文字水印"); self.v_text_chk.setChecked(True)
         self.v_text_motion_combo = QComboBox()
-        self.v_text_motion_combo.addItems(_V_MOTION_LABELS)
-        self.v_text_motion_combo.setCurrentText("跟随")
+        for _m in _V_MOTION_LABELS:
+            self.v_text_motion_combo.addItem(_m, _m)   # itemData = 中文键，切语言不失效
+        self.v_text_motion_combo.setCurrentText("固定")
         self.v_img_chk = QCheckBox("图片水印")
         self.v_img_motion_combo = QComboBox()
-        self.v_img_motion_combo.addItems(_V_MOTION_LABELS)
-        self.v_img_motion_combo.setCurrentText("跟随")
+        for _m in _V_MOTION_LABELS:
+            self.v_img_motion_combo.addItem(_m, _m)
+        self.v_img_motion_combo.setCurrentText("固定")
         ht.addWidget(self.v_text_chk); ht.addWidget(QLabel("播放方式:"))
         ht.addWidget(self.v_text_motion_combo)
         ht.addSpacing(12)
@@ -1250,14 +1413,54 @@ class App(QMainWindow):
         self.v_size_spin = QDoubleSpinBox(); self.v_size_spin.setRange(2, 20); self.v_size_spin.setValue(6)
         self.v_size_spin.setSuffix("%高"); hdr.addWidget(QLabel("字号:")); hdr.addWidget(self.v_size_spin)
         v.addLayout(hdr)
+        # 中文字体 / 西文字体：视频没有“导入文档”动作，故启动时从本机已安装字体
+        # （Windows 字体注册表，不启动 Word、无需授权）扩充，效果与 Word 文本水印一致。
+        # 渲染复用 engine_docx.render_text_png 的中西文分字逻辑：汉字用中文字体、
+        # 拉丁字母/数字/半角标点用西文字体。
+        hf = QHBoxLayout()
+        self.v_cn_font_combo, self.v_cn_font_model = self._make_font_combo("微软雅黑")
+        self.v_cn_font_combo.setToolTip("视频文字水印的中文（CJK）字形所用字体")
+        hf.addWidget(QLabel("中文字体:")); hf.addWidget(self.v_cn_font_combo, 1)
+        self.v_latin_font_combo, self.v_latin_font_model = self._make_font_combo("Arial")
+        self.v_latin_font_combo.setToolTip("视频文字水印的拉丁字母/数字/半角标点所用字体")
+        hf.addWidget(QLabel("西文字体:")); hf.addWidget(self.v_latin_font_combo, 1)
+        v.addLayout(hf)
         self.v_speed_spin = QDoubleSpinBox(); self.v_speed_spin.setRange(1, 50); self.v_speed_spin.setValue(12)
         self.v_speed_spin.setSuffix("%/秒"); self.v_speed_spin.setEnabled(False)  # 纯固定时不相关
+        # 生效时段：默认全片；勾选后水印只在 [起, 止) 这段时间内出现，用来遮挡
+        # 视频里某几秒才出现的敏感信息（其余时刻画面保持干净）。
+        # 写法就是一行「1.0-2.0」：起-止两个秒数，一眼看懂，不用在两个框之间来回看。
+        hrng = QHBoxLayout()
+        self.v_range_chk = QCheckBox("限定时段")
+        self.v_range_chk.setToolTip(
+            "勾选后，水印只在右边填的这段时间里出现，其余时刻画面保持原样。\n"
+            "例：3 秒视频只想遮住第 2 秒 → 填 1.0-2.0。\n"
+            "可用下方预览的「时刻(秒)」右侧 ▲/▼（点一次 ±0.5 秒）"
+            "跳到时段内/外，直接确认效果。")
+        hrng.addWidget(self.v_range_chk)
+        self.v_range_edit = QLineEdit()
+        self.v_range_edit.setPlaceholderText("如 1.0-2.0")
+        self.v_range_edit.setText("1.0-2.0")
+        self.v_range_edit.setMaximumWidth(110)
+        self.v_range_edit.setToolTip(
+            "填「起-止」两个秒数，例：1.0-2.0（水印只在第 1~2 秒出现）。\n"
+            "分隔符用 - 、 ~ 、「到」、逗号或空格都行；止要大于起。")
+        hrng.addWidget(self.v_range_edit)
+        hrng.addWidget(QLabel("秒"))
+        hrng.addStretch(1)
+        v.addLayout(hrng)
+        # 实时把填的内容翻译成一句人话（合法→蓝字说明，填错→红字提示），
+        # 免得用户填完不知道工具到底认成了几秒到几秒。
+        self.v_range_hint = QLabel("")
+        self.v_range_hint.setWordWrap(True)
+        v.addWidget(self.v_range_hint)
 
         # 图片水印参数
         hi = QHBoxLayout()
         self.v_img_edit = QLineEdit(); self.v_img_edit.setPlaceholderText("水印图片路径（可选）")
         hi.addWidget(self.v_img_edit, 3)
-        bi = QPushButton("选择图片..."); bi.clicked.connect(self._v_browse_img); hi.addWidget(bi, 1)
+        bi = QPushButton("选择图片..."); bi.setStyleSheet(BTN_BLUE)
+        bi.clicked.connect(self._v_browse_img); hi.addWidget(bi, 1)
         v.addLayout(hi)
         hir = QHBoxLayout()
         self.v_img_alpha_spin = QDoubleSpinBox(); self.v_img_alpha_spin.setRange(0, 100); self.v_img_alpha_spin.setValue(70)
@@ -1266,28 +1469,12 @@ class App(QMainWindow):
         self.v_img_scale_spin.setSuffix("%宽"); hir.addWidget(QLabel("大小:")); hir.addWidget(self.v_img_scale_spin)
         v.addLayout(hir)
 
-        # 播放方式：固定 / 滚动 / 固定+滚动（单选，三者互斥）
-        hm = QHBoxLayout()
-        hm.addWidget(QLabel("播放方式:"))
-        self.v_motion_group = QButtonGroup(self)
-        self.v_motion_group.setExclusive(True)
-        self.v_motion_fixed = QRadioButton("固定")
-        self.v_motion_scroll = QRadioButton("滚动")
-        self.v_motion_both = QRadioButton("固定+滚动")
-        self.v_motion_group.addButton(self.v_motion_fixed, 0)
-        self.v_motion_group.addButton(self.v_motion_scroll, 1)
-        self.v_motion_group.addButton(self.v_motion_both, 2)
-        self.v_motion_fixed.setChecked(True)
-        for rb in (self.v_motion_fixed, self.v_motion_scroll, self.v_motion_both):
-            hm.addWidget(rb)
-        hm.addStretch(1)
-        v.addLayout(hm)
-        # 改全局播放方式时，把两个“跟随”下拉同步过来，避免界面看起来不一致
-        self.v_motion_group.buttonClicked.connect(self._v_sync_motion_combos)
-        # 类型勾选 / 播放方式变动时，实时刷新「滚动速度」是否可用
+        # （2026-09-27）已移除“全局播放方式”单选与“跟随”选项：文字/图片各自的下拉
+        # 即为唯一的播放方式控制，二者完全独立，避免三个播放方式控件混淆、且“跟随”
+        # 会掩盖 per-type 的明确设置。
+        # 类型勾选 / per-type 播放方式变动时，实时刷新「滚动速度」是否可用
         self.v_text_chk.stateChanged.connect(self._v_refresh_motion_ui)
         self.v_img_chk.stateChanged.connect(self._v_refresh_motion_ui)
-        self.v_motion_group.buttonClicked.connect(self._v_refresh_motion_ui)
         self.v_text_motion_combo.currentTextChanged.connect(self._v_refresh_motion_ui)
         self.v_img_motion_combo.currentTextChanged.connect(self._v_refresh_motion_ui)
         self._v_refresh_motion_ui()   # 建完控件后再刷一次，保证初始态正确
@@ -1396,6 +1583,20 @@ class App(QMainWindow):
                                    "落点会自动写入上方 X/Y 百分比，下拉切到「自定义」。")
         self.v_drag_chk.stateChanged.connect(self._v_toggle_drag)
         vpv.addWidget(self.v_drag_chk)
+        # 拖拽定位对象：文字 / 图像，可分别把两种水印拖到不同位置（互不覆盖）
+        hp_drag = QHBoxLayout()
+        hp_drag.addWidget(QLabel("拖拽定位对象:"))
+        self.v_drag_target_combo = QComboBox()
+        for _lb, _key in (("文字", "text"), ("图片", "image")):
+            self.v_drag_target_combo.addItem(_lb, _key)
+        self.v_drag_target_combo.setCurrentIndex(0)
+        self.v_drag_target_combo.setToolTip(
+            "选择拖拽时移动哪种水印：文字或图片，互不干扰，"
+            "因此可把文字拖到一处、图片拖到另一处，无需分两次加水印。")
+        self.v_drag_target_combo.currentIndexChanged.connect(self._v_on_drag_target)
+        hp_drag.addWidget(self.v_drag_target_combo)
+        hp_drag.addStretch(1)
+        vpv.addLayout(hp_drag)
         self.v_pos_lbl = QLabel("自定义位置：未设定（默认右下/左下）")
         self.v_pos_lbl.setWordWrap(True)
         vpv.addWidget(self.v_pos_lbl)
@@ -1410,10 +1611,21 @@ class App(QMainWindow):
         self.v_t_spin = QDoubleSpinBox()
         self.v_t_spin.setRange(0, 3600); self.v_t_spin.setDecimals(1)
         self.v_t_spin.setSingleStep(0.5); self.v_t_spin.setValue(1.0)
-        self.v_t_spin.setMaximumWidth(80)
+        # 关掉 Qt 自带的上下箭头：那两个窄三角形在部分 Windows 样式/宽度下，
+        # 点击热区与实际三角形会错位，出现「点上箭头却落进输入框变成自定义输入」。
+        # 改用两个独立的 ▲/▼ 小按钮（_make_stepper），热区就是按钮本身：
+        # 上箭头点一次 +0.5 秒，下箭头点一次 -0.5 秒。
+        self.v_t_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self.v_t_spin.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.v_t_spin.setMinimumWidth(84)
+        self.v_t_spin.setMaximumWidth(120)
         self.v_t_spin.setToolTip("取视频第几秒的画面来预览；滚动水印可用它确认不同时刻的位置")
         self.v_t_spin.valueChanged.connect(self._v_grab_frame)
         hvprev.addWidget(self.v_t_spin)
+        self.v_t_up_btn, self.v_t_dn_btn, self.v_t_stepper = self._make_stepper(
+            self.v_t_spin, step=0.5,
+            up_tip="预览时刻 +0.5 秒", dn_tip="预览时刻 -0.5 秒")
+        hvprev.addWidget(self.v_t_stepper, 0, Qt.AlignVCenter)
         hvprev.addStretch(1)
         self.v_play_btn = QPushButton("播放短片预览")
         self.v_play_btn.setStyleSheet(BTN_HL)
@@ -1437,15 +1649,20 @@ class App(QMainWindow):
         for w in (self.v_text_edit, self.v_img_edit,
                   self.v_alpha_spin, self.v_size_spin,
                   self.v_img_alpha_spin, self.v_img_scale_spin,
-                  self.v_text_motion_combo, self.v_img_motion_combo):
+                  self.v_text_motion_combo, self.v_img_motion_combo,
+                  self.v_cn_font_combo, self.v_latin_font_combo):
             sig = getattr(w, "textChanged", None) or getattr(w, "valueChanged", None)
             if sig is None:
                 sig = w.currentTextChanged
             sig.connect(self._v_schedule_frame)
-        for rb in (self.v_motion_fixed, self.v_motion_scroll, self.v_motion_both):
-            rb.toggled.connect(self._v_schedule_frame)
         self.v_text_chk.stateChanged.connect(self._v_schedule_frame)
         self.v_img_chk.stateChanged.connect(self._v_schedule_frame)
+        self.v_range_chk.stateChanged.connect(self._v_on_range_changed)
+        self.v_range_edit.textChanged.connect(self._v_on_range_text)
+        self._v_on_range_changed()   # 初始化可用态 + 提示语（默认未勾选 → 全片生效）
+        # 视频水印没有“导入文档”动作，启动时即扩充其字体下拉（仅读系统字体注册表，
+        # 不启动 Word、无需授权），与 Word 标签页的字体来源完全一致。
+        self._startup_load_video_fonts()
 
         # 运行按钮（进度条已移到窗口底部状态行，见 _build_ui 末尾）
         hr = QHBoxLayout()
@@ -1479,6 +1696,9 @@ class App(QMainWindow):
         # 让它在布局里抢空间会把预览帧挤小）
         self.v_status_lbl.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         v.addWidget(self.v_status_lbl)
+        # 让预览在构建时即持有一张示意帧：否则 _v_last_frame 为空时，改任何参数
+        # （尤其是 per-type 播放方式）都不会重绘，用户会误以为“改了没反应”。
+        self._v_grab_frame()
         return wrap
 
     def _v_make_xy_spin(self, value):
@@ -1549,17 +1769,12 @@ class App(QMainWindow):
         self._v_schedule_frame()
 
     def _v_motion(self):
-        """把单选的播放方式映射为引擎 motion 值。"""
-        checked = self.v_motion_group.checkedButton()
-        label = checked.text() if checked else "固定"
-        return _V_MOTION_MAP.get(label, "fixed")
+        """顶层 motion：仅作图层未显式指定时的兜底。
 
-    def _v_sync_motion_combos(self):
-        """全局播放方式变动时，让两个“跟随”下拉跟着走。"""
-        for combo in (getattr(self, "v_text_motion_combo", None),
-                      getattr(self, "v_img_motion_combo", None)):
-            if combo is not None and _combo_key(combo) == "跟随":
-                combo.setCurrentIndex(combo.findData(_V_MOTION_INVERSE.get(self._v_motion(), "跟随")))
+        现在文字/图片各自的下拉都会写进对应图层的 motion，因此顶层恒为“固定”，
+        不再有“全局单选 + 跟随”机制。
+        """
+        return "fixed"
 
     def _v_browse_src(self):
         p, _ = QFileDialog.getOpenFileName(self, i18n.tr("选择视频文件"), "",
@@ -1645,6 +1860,10 @@ class App(QMainWindow):
             "alpha": int(self.v_alpha_spin.value() / 100.0 * 255),
             "size_frac": self.v_size_spin.value() / 100.0,
             "position": tpos,
+            # 中西文分字体：汉字用中文字体、拉丁字母/数字用西文字体，
+            # 渲染时由 engine_docx.render_text_png 按字符类别自动分流。
+            "cn_font_name": self.v_cn_font_combo.currentText(),
+            "latin_font_name": self.v_latin_font_combo.currentText(),
         }
         image_cfg = {
             "image_path": self.v_img_edit.text().strip(),
@@ -1652,15 +1871,14 @@ class App(QMainWindow):
             "img_frac": self.v_img_scale_spin.value() / 100.0,
             "position": ipos,
         }
-        global_motion = self._v_motion()
-        # 文字/图片各自可单独指定播放方式；选“跟随”时才用全局的
+        # 文字/图片各自的下拉即为该图层的播放方式（不再有“跟随”/全局单选）
         if "image" in kinds:
-            image_cfg["motion"] = _resolve_motion(self.v_img_motion_combo, global_motion)
+            image_cfg["motion"] = _resolve_motion(self.v_img_motion_combo, "fixed")
         if "text" in kinds:
-            text_cfg["motion"] = _resolve_motion(self.v_text_motion_combo, global_motion)
+            text_cfg["motion"] = _resolve_motion(self.v_text_motion_combo, "fixed")
         opts = {
             "kinds": kinds,
-            "motion": global_motion,
+            "motion": self._v_motion(),
             "scroll_speed": self.v_speed_spin.value() / 100.0,
             "text": text_cfg,
             "image": image_cfg,
@@ -1671,58 +1889,106 @@ class App(QMainWindow):
         # 只有确实存在滚动图层时，滚动速度才可用（引擎侧会兜底，这里置 0 只是不再显示进度）
         if "scroll" not in video_mod._effective_motions(opts):
             opts["scroll_speed"] = 0
+        # 生效时段：勾选且「起-止」填得合法（止 > 起）才下发；否则引擎按“全片生效”处理
+        if self.v_range_chk.isChecked():
+            _r = parse_time_range(self.v_range_edit.text())
+            if _r:
+                opts["time_range"] = _r
         self._v_refresh_motion_ui()
         return opts
 
     def _v_refresh_motion_ui(self):
-        """按当前勾选，刷新「滚动速度」是否可用。"""
+        """按当前勾选与 per-type 播放方式，刷新「滚动速度」是否可用。
+
+        只要文字或图片任一图层含滚动，滚动速度就启用；否则置灰（纯固定时用不到）。
+        """
         kinds = [k for k, chk in (("text", self.v_text_chk), ("image", self.v_img_chk))
                  if chk.isChecked()]
-        opts = {"kinds": kinds, "motion": self._v_motion(),
-                "text": {"motion": _resolve_motion(self.v_text_motion_combo, self._v_motion())},
-                "image": {"motion": _resolve_motion(self.v_img_motion_combo, self._v_motion())}}
+        opts = {"kinds": kinds, "motion": "fixed",
+                "text": {"motion": _resolve_motion(self.v_text_motion_combo, "fixed")},
+                "image": {"motion": _resolve_motion(self.v_img_motion_combo, "fixed")}}
         self.v_speed_spin.setEnabled("scroll" in video_mod._effective_motions(opts))
 
     # --------------------------------------------------- 视频预览 / 拖拽定位
     def _v_toggle_drag(self, state):
         """拖拽开关：开启后在预览帧上拖动即可定位，落点写回 X/Y（下拉切「自定义」）。
 
-        注意：stateChanged 在 PySide6 里传的是枚举，而部分环境/老代码会按 int 比较，
-        用 int(state) != 0 兼容两种形态，避免判断失效。
+        开启时把“正在被拖”的标记设为当前选中的定位对象（文字/图片），
+        这样拖拽只移动该对象、不会把两种水印一起带走。
         """
         # PySide6 的 CheckState 是独立枚举（既不等于 int，也不能直接 int()），
         # PyQt6 / 老接口又可能传 int；统一取 .value（没有就当 int）再判非零。
         _s = getattr(state, "value", state)
         on = (int(_s) != 0)
-        # 不再停用预设下拉：拖拽与下拉/X-Y 是同一份状态，互为入口更直观
-        if on and self.v_custom_pos is None:
-            p = self._v_position(self.v_text_pos_combo,
-                                 self.v_text_x_spin, self.v_text_y_spin)
-            self.v_custom_pos = (p[0], p[1])
+        key = _combo_key(self.v_drag_target_combo)
+        self.v_frame_label.setActiveMarkerKey(key if on else None)
         self._v_update_pos_label()
         if on:
             self._v_show_frame()      # 立即按自定义位置重绘
 
+    def _v_on_drag_target(self, _i=None):
+        """切换拖拽定位对象（文字/图片）：同步更新帧上“正在被拖”的标记。"""
+        key = _combo_key(self.v_drag_target_combo)
+        on = self.v_drag_chk.isChecked()
+        self.v_frame_label.setActiveMarkerKey(key if on else None)
+        self._v_update_pos_label()
+
     def _v_update_pos_label(self):
-        """位置摘要：优先显示「自定义」落点，否则显示当前预设对应的 X/Y。"""
-        if getattr(self, "v_custom_pos", None):
-            self.v_pos_lbl.setText(i18n.trf(
-                "自定义位置：X {x:.0f}% Y {y:.0f}%",
-                x=self.v_custom_pos[0] * 100, y=self.v_custom_pos[1] * 100))
-            return
+        """位置摘要：始终显示文字/图片各自的 X/Y，并标出当前拖拽对象。"""
         tpos = self._v_position(self.v_text_pos_combo,
                                 self.v_text_x_spin, self.v_text_y_spin)
         ipos = self._v_position(self.v_img_pos_combo,
                                 self.v_img_x_spin, self.v_img_y_spin)
+        tgt = _combo_key(self.v_drag_target_combo)
+        tgt_lbl = "文字" if tgt == "text" else "图片"
         self.v_pos_lbl.setText(i18n.trf(
-            "文字 X {tx:.0f}% Y {ty:.0f}% ｜ 图片 X {ix:.0f}% Y {iy:.0f}%",
+            "文字 X {tx:.0f}% Y {ty:.0f}% ｜ 图片 X {ix:.0f}% Y {iy:.0f}% ｜ 拖拽对象：{g}",
             tx=tpos[0] * 100, ty=tpos[1] * 100,
-            ix=ipos[0] * 100, iy=ipos[1] * 100))
+            ix=ipos[0] * 100, iy=ipos[1] * 100, g=tgt_lbl))
 
     def _v_preview_time(self):
         """预览取第几秒的画面（滚动水印可借此看不同时刻的位置）。"""
         sp = getattr(self, "v_t_spin", None)
         return float(sp.value()) if sp is not None else 1.0
+
+    def _v_on_range_changed(self, _state=None):
+        """「限定时段」开关：勾选才启用「起-止」输入框；并把预览时刻带进时段内，
+        让用户一勾选就能立刻看到“这段有水印”，而不是对着时段外的干净画面发懵。
+
+        仅在**勾选状态切换**时跳转时刻，之后用户手动调「时刻(秒)」不会被拉回——
+        调到时段外看到没有水印，正是验证时段是否正确的手段。
+        """
+        on = self.v_range_chk.isChecked()
+        self.v_range_edit.setEnabled(on)
+        if on:
+            r = parse_time_range(self.v_range_edit.text())
+            if r:
+                s, e = r
+                t = self._v_preview_time()
+                if t < s or t >= e:
+                    self.v_t_spin.setValue(s)
+        self._v_update_range_hint()
+        self._v_schedule_frame()
+
+    def _v_on_range_text(self, _text=None):
+        """「起-止」输入框内容变化：即时刷新说明（蓝字/红字）并重绘预览。"""
+        self._v_update_range_hint()
+        self._v_schedule_frame()
+
+    def _v_update_range_hint(self):
+        """把用户填的「1.0-2.0」翻译成一句人话；填不出来就红字提示正确写法。"""
+        if not self.v_range_chk.isChecked():
+            self.v_range_hint.setText("")
+            return
+        r = parse_time_range(self.v_range_edit.text())
+        if r:
+            self.v_range_hint.setStyleSheet("color:#1565c0; font-size:11px;")
+            self.v_range_hint.setText(
+                f"水印只在第 {r[0]:.1f} ~ {r[1]:.1f} 秒出现，其余时刻画面保持干净")
+        else:
+            self.v_range_hint.setStyleSheet("color:#d93025; font-size:11px;")
+            self.v_range_hint.setText(
+                "请填「起-止」两个秒数，如 1.0-2.0（止要大于起）")
 
     def _v_placeholder_frame(self):
         """未选视频时的 16:9 示意画面：深灰底 + 浅色网格，便于确认水印位置与大小。"""
@@ -1778,8 +2044,22 @@ class App(QMainWindow):
         bio = io.BytesIO(); img.save(bio, "PNG"); bio.seek(0)
         qimg = QImage.fromData(bio.getvalue())
         self.v_frame_label.setBasePixmap(QPixmap.fromImage(qimg))
-        if getattr(self, "v_custom_pos", None):
-            self.v_frame_label.setMarker(*self.v_custom_pos)
+        # 同时画出文字/图片两个锚点（各自颜色+文字标号），即便位置重叠也能分清；
+        # 仅当对应水印启用时才画，避免出现“幽灵”标记。
+        markers = []
+        if self.v_text_chk.isChecked():
+            tp = self._v_position(self.v_text_pos_combo,
+                                  self.v_text_x_spin, self.v_text_y_spin)
+            markers.append({"fx": tp[0], "fy": tp[1],
+                            "color": (225, 6, 0), "label": "文", "key": "text"})
+        if self.v_img_chk.isChecked():
+            ip = self._v_position(self.v_img_pos_combo,
+                                  self.v_img_x_spin, self.v_img_y_spin)
+            markers.append({"fx": ip[0], "fy": ip[1],
+                            "color": (0, 120, 215), "label": "图", "key": "image"})
+        self.v_frame_label.setMarkers(markers)
+        self.v_frame_label.setActiveMarkerKey(
+            _combo_key(self.v_drag_target_combo) if self.v_drag_chk.isChecked() else None)
         self._v_update_pos_label()
 
     def _v_schedule_frame(self):
@@ -1792,24 +2072,25 @@ class App(QMainWindow):
         timer.start()
 
     def _on_video_frame_drag(self, fx, fy):
-        """视频预览帧拖拽：把落点写回 X/Y 并切到「自定义」，随后实时重绘。
+        """视频预览帧拖拽：只把【当前拖拽对象】写回 X/Y 并切到「自定义」，随后重绘。
 
-        文字与图片统一采用该落点（与 Word 侧拖拽行为一致），用户若想错开，
-        可在拖拽后单独改图片的 X/Y。
+        文字与图片各自独立：选「文字」拖只动文字、选「图片」拖只动图片，
+        因此可以分别把两者放到不同位置，一次导出即成，无需分两次加水印。
         """
         if not self.v_drag_chk.isChecked():
             return
-        self.v_custom_pos = (fx, fy)
+        key = _combo_key(self.v_drag_target_combo)
+        if key == "image":
+            x_spin, y_spin, combo = self.v_img_x_spin, self.v_img_y_spin, self.v_img_pos_combo
+        else:
+            x_spin, y_spin, combo = self.v_text_x_spin, self.v_text_y_spin, self.v_text_pos_combo
         self._v_pos_applying = True
         try:
-            for sp in (self.v_text_x_spin, self.v_img_x_spin):
-                sp.setValue(round(fx * 100))
-            for sp in (self.v_text_y_spin, self.v_img_y_spin):
-                sp.setValue(round(fy * 100))
-            for cb in (self.v_text_pos_combo, self.v_img_pos_combo):
-                cb.blockSignals(True)
-                cb.setCurrentIndex(cb.findData("自定义"))     # 按 key 定位，不受界面语言影响
-                cb.blockSignals(False)
+            x_spin.setValue(round(fx * 100))
+            y_spin.setValue(round(fy * 100))
+            combo.blockSignals(True)
+            combo.setCurrentIndex(combo.findData("自定义"))     # 按 key 定位，不受界面语言影响
+            combo.blockSignals(False)
         finally:
             self._v_pos_applying = False
         self._v_update_pos_label()
@@ -1961,6 +2242,25 @@ class App(QMainWindow):
         lbl.setStyleSheet("color:#e10600; font-family:'FangSong','仿宋'; font-size:11px;")
         lbl.setWordWrap(True)
         return lbl
+
+    def _make_hover_hint(self, text, helper_text, parent):
+        """构造“可悬浮短语 + 蓝字小字说明”组合：
+
+        - text：红字仿宋短语（如“PDF取任意页”），带下划线 + 手型光标，提示“可悬浮”；
+        - 鼠标移入该短语时，其下方一行蓝色小字（helper_text）显现，移出即隐藏；
+        - 返回 (短语标签, 说明标签)，调用方需把两者分别加入同一布局（说明标签默认隐藏）。
+
+        ⚠ 这里**刻意不给 phrase 设 setToolTip**：否则悬停会同时冒出两处说明——
+        Qt 的系统 tooltip（黄底黑字）与下方这行蓝色小字，内容还一模一样，很乱。
+        只保留蓝字这一种；tooltip 仍会随父控件继承（实测会显示为空，无影响）。
+        """
+        helper = QLabel(helper_text, parent)
+        helper.setWordWrap(True)
+        helper.setStyleSheet("color:#1565c0; font-size:11px;")  # 蓝色小字
+        helper.setVisible(False)
+        phrase = _HoverHintLabel(text, helper, parent)
+        phrase.setToolTip("")   # 见上文：清空系统 tooltip，避免与蓝字说明重复
+        return phrase, helper
 
     def _make_group(self, title):
         """生成一个带标题的边框分组容器，返回该 QWidget（其 layout 已建好、垂直）。"""
@@ -2201,6 +2501,46 @@ class App(QMainWindow):
         row.addWidget(spin, 1)
         return row, slider, spin
 
+    def _make_stepper(self, spin, step=None, up_tip="", dn_tip=""):
+        """给数值框配一对独立的 ▲/▼ 小按钮，替代 Qt 自带的窄箭头。
+
+        为什么要自己画：Q(Double)SpinBox 自带箭头的点击热区由 QStyle 决定，
+        某些 Windows 样式 / 宽度下热区会和画出来的三角形错位，于是“点上面的三角
+        形”实际点到了输入框里（就变成手动输入）。换成两个真正的 QToolButton 后，
+        热区 = 按钮矩形，绝无歧义；行为也一眼可见：上 +1 步、下 -1 步。
+
+        返回 (up_btn, dn_btn, container)，container 直接 addWidget 到布局即可。
+        """
+        if step is not None:
+            spin.setSingleStep(float(step))
+        box = QWidget()
+        # 固定尺寸策略：否则在整行都被拉高时，两个按钮会被平摊到上下两端，
+        # 中间裂开一道缝，看着不像一个微调器。
+        box.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        vb = QVBoxLayout(box)
+        vb.setContentsMargins(0, 0, 0, 0)
+        vb.setSpacing(0)
+        st = spin.style()
+        up = QToolButton()
+        dn = QToolButton()
+        up.setIcon(st.standardIcon(QStyle.SP_ArrowUp))
+        dn.setIcon(st.standardIcon(QStyle.SP_ArrowDown))
+        for b in (up, dn):
+            b.setStyleSheet(STEP_BTN)
+            b.setFixedSize(22, 12)
+            b.setIconSize(QSize(12, 8))
+            # 按住不放会连续步进，调时刻时不必一下下点
+            b.setAutoRepeat(True)
+            b.setAutoRepeatDelay(300)
+            b.setAutoRepeatInterval(90)
+        up.setToolTip(up_tip or f"+{spin.singleStep():g}")
+        dn.setToolTip(dn_tip or f"-{spin.singleStep():g}")
+        up.clicked.connect(lambda _c=False: spin.stepBy(1))
+        dn.clicked.connect(lambda _c=False: spin.stepBy(-1))
+        vb.addWidget(up)
+        vb.addWidget(dn)
+        return up, dn, box
+
     def _make_font_combo(self, default_text):
         """构造一个【可编辑 + 前缀自动补全】的字体下拉框（如 Word 的字体选择）。
 
@@ -2299,7 +2639,28 @@ class App(QMainWindow):
         self.image_enabled = self.img_chk.isChecked()
         for w in self.img_ctrl_widgets:
             w.setEnabled(self.image_enabled)
+        self._refresh_pdf_page_state()
         self._schedule_preview()
+
+    def _refresh_pdf_page_state(self):
+        """PDF 页码控件：仅在“图像水印启用 且 当前图片为 PDF”时可用；并据实际页数设上限。
+
+        非 PDF（或未选图）时禁用并复位上限，避免用户误填。
+        """
+        path = self.img_edit.text().strip()
+        is_pdf = path.lower().endswith(".pdf") and os.path.exists(path)
+        if is_pdf:
+            try:
+                import pymupdf  # 与引擎一致：PyMuPDF 已在打包隐藏依赖中
+                n = pymupdf.open(path).page_count
+                self.img_pdf_page_spin.setMaximum(max(1, n))
+                if self.img_pdf_page_spin.value() > n:
+                    self.img_pdf_page_spin.setValue(n)
+            except Exception:
+                self.img_pdf_page_spin.setMaximum(9999)
+        else:
+            self.img_pdf_page_spin.setMaximum(9999)
+        self.img_pdf_page_spin.setEnabled(self.image_enabled and is_pdf)
 
     def _browse_file(self):
         p, _ = QFileDialog.getOpenFileName(self, "选择 Word 文件", "",
@@ -2361,6 +2722,42 @@ class App(QMainWindow):
         self._set_busy(False)
         self._append_log(f"读取字体失败：{msg}（仍可使用内置字体）")
 
+    # --------------------------------------------------- 视频字体（无需导入文档）
+    def _startup_load_video_fonts(self):
+        """视频水印没有“导入文档”动作，故启动时用系统字体注册表（不启动 Word、
+        无需授权）一次性扩充视频的“中文字体/西文字体”下拉框。
+
+        与 Word 标签页的字体来源完全一致（两者最终都来自本机已安装字体）；
+        FontWorker 默认走 registry 路径，不会触发“幽灵 Word”。
+        """
+        if getattr(self, "_video_fonts_loaded", False):
+            return
+        self._video_fonts_loaded = True
+        w = FontWorker()
+        self._video_font_worker = w  # 保住引用，避免线程运行中对象被 GC
+        w.finished_signal.connect(self._on_video_fonts_loaded)
+        w.error_signal.connect(lambda m: None)
+        w.start()
+
+    def _on_video_fonts_loaded(self, fonts, source):
+        """把系统字体合并进视频的两个字体下拉框（去重、保持当前选择）。"""
+        if not fonts:
+            return
+        combos = [self.v_cn_font_combo, self.v_latin_font_combo]
+        existing = set()
+        for c in combos:
+            existing |= {c.itemText(i) for i in range(c.count())}
+        new = sorted({f for f in fonts if f and f not in existing})
+        if not new:
+            return
+        for c in combos:
+            cur = c.currentText()
+            c.blockSignals(True)
+            c.addItems(new)
+            c.setCurrentText(cur)
+            c.blockSignals(False)
+        self._v_schedule_frame()  # 字体变多了，刷新一下预览
+
     def _apply_word_fonts(self, fonts):
         """把字体名合并进“中文字体 / 西文字体”两个下拉框，去重、保持各自当前选择，
         返回新增数量（两框新增集合相同，返回该集合的大小）。
@@ -2411,6 +2808,7 @@ class App(QMainWindow):
                                            "图片 (*.png *.jpg *.jpeg *.webp *.pdf);;All (*.*)")
         if p:
             self.image_path = p; self.img_edit.setText(p)
+            self._refresh_pdf_page_state()
             self._schedule_preview()
 
     def _pick_color(self):
@@ -2438,6 +2836,7 @@ class App(QMainWindow):
             },
             "image": {
                 "image_path": self.img_edit.text().strip(),
+                "pdf_page": self.img_pdf_page_spin.value(),  # PDF 水印图选取的页码（1-based）
                 "angle": self.img_angle,
                 "transparency": self.img_transparency,
                 "scale": self.img_scale,
@@ -2580,19 +2979,46 @@ class App(QMainWindow):
         qimg = QImage.fromData(bio.getvalue())
         pix = QPixmap.fromImage(qimg)
         self.preview_label.setBasePixmap(pix)
+        # 同时画出文字/图片两个锚点（红=文 / 蓝=图），即便两者位置重叠也能一眼分清。
+        markers = []
+        if self.text_enabled:
+            markers.append({"fx": 0.5 + self.text_offset_x / 100.0,
+                            "fy": 0.5 + self.text_offset_y / 100.0,
+                            "color": (225, 6, 0), "label": "文", "key": "text"})
+        if self.image_enabled:
+            markers.append({"fx": 0.5 + self.img_offset_x / 100.0,
+                            "fy": 0.5 + self.img_offset_y / 100.0,
+                            "color": (0, 120, 215), "label": "图", "key": "image"})
+        self.preview_label.setMarkers(markers)
+        self.preview_label.setActiveMarkerKey(
+            _combo_key(self.preview_drag_target_combo)
+            if self.preview_drag_chk.isChecked() else None)
+
+    def _on_preview_drag_target(self, _i=None):
+        """切换拖拽定位对象（文字/图片）：同步更新预览图上“正在被拖”的标记。"""
+        key = _combo_key(self.preview_drag_target_combo)
+        on = self.preview_drag_chk.isChecked()
+        self.preview_label.setActiveMarkerKey(key if on else None)
 
     def _on_preview_drag(self, fx, fy):
-        """Word 预览拖拽：把水印中心映射到水平/垂直偏移（-50%~50%，0=居中）。"""
+        """Word 预览拖拽：只把【当前拖拽对象】映射到水平/垂直偏移（-50%~50%，0=居中）。
+
+        文字与图片各自独立：选「文字」拖只动文字、选「图片」拖只动图片，
+        因此可以分别把两者放到不同位置，一次插入即成，无需分两次加水印。
+        """
         if not self.preview_drag_chk.isChecked():
             return
         off_x = max(-50.0, min(50.0, (fx - 0.5) * 100.0))
         off_y = max(-50.0, min(50.0, (fy - 0.5) * 100.0))
-        # 文本与图像水印同步到同一落点（预览里两者常见叠在一起）
-        self.text_offx_spin.setValue(off_x)
-        self.text_offy_spin.setValue(off_y)
-        self.img_offx_spin.setValue(off_x)
-        self.img_offy_spin.setValue(off_y)
-        # 滑块的 valueChanged 已触发 _schedule_preview，这里无需再手动刷新
+        key = _combo_key(self.preview_drag_target_combo)
+        if key == "image":
+            self.img_offx_spin.setValue(off_x)
+            self.img_offy_spin.setValue(off_y)
+        else:
+            self.text_offx_spin.setValue(off_x)
+            self.text_offy_spin.setValue(off_y)
+        # 立即重绘预览与标记（滑块 valueChanged 走的是防抖定时器，拖拽时直接刷新更跟手）
+        self._render_preview()
 
     def _save_preview(self):
         if self._preview_img is None:
@@ -2637,34 +3063,83 @@ class App(QMainWindow):
             out = core.default_output_path(self.file_path)
             self.out_edit.setText(out)
         kinds = None
-        # 仅对 .docx 检测。检测结果是**本次清除范围的依据**，必须逐类型落到 kinds，
-        # 否则会掉进 kinds=None -> clear_any=True 这个「扩大删除范围」的分支：
-        # 除了本工具的水印，还会把页眉里用户自己衬于文字下方的图片一起删掉。
-        if not core._use_com(self.file_path):
+        # —— 清除范围的安全守门 ——
+        # 本工具只认识带私有标记(MARK_TEXT/MARK_IMG)的水印；Word 原生水印（衬于文字下方的
+        # 图片）不携带标记，全清(clear_any)会一并删掉。为避免误删用户自己的原生水印，分情况处理：
+        #   1) 有本工具水印        -> 按类型精确清除，绝不碰原生（既有行为）；
+        #   2) 无本工具水印、但有原生水印 -> 弹窗确认后才允许全清；
+        #   3) 两者都没有          -> 告知无内容可清，不执行。
+        if core._use_com(self.file_path):
+            # .doc 走 COM：无法精确区分工具/原生水印，故“检测到任何水印”即按需征求同意
+            # （按用户“确认后才删原生水印”的意图，宁可多问一次也不静默删除）。
             try:
-                types = engine_docx.detect_watermark_types(self.file_path)
+                has_any = core.has_watermark(self.file_path)
             except Exception as e:
-                # 检测失败绝不退化成“扩大删除范围”：直接取消本次清除并向用户报告。
-                # 真正的原因同时写入日志，方便事后排查（不吞异常）。
                 log.exception("水印检测失败，已取消本次清除: %s", e)
                 QMessageBox.warning(
                     self, "提示",
                     "水印检测失败，为避免误删内容，已取消本次清除。\n\n"
                     f"错误：{type(e).__name__}: {e}")
                 return
-            if types == {"text", "image"}:
-                # 同时含两类水印：弹窗让用户逐项选择（行为与之前一致）
-                choice = self._ask_clear_choice()
-                if choice is None:        # 用户点了“取消”
-                    return
-                kinds = {"text": ["text"], "image": ["image"],
-                         "both": ["text", "image"]}[choice]
-            elif types == {"text"}:
-                kinds = ["text"]          # 只有文字水印：只删文字，不扩大范围
-            elif types == {"image"}:
-                kinds = ["image"]         # 只有图片水印：只删图片，不扩大范围
-            # 空集：文档里没有本工具识别到的水印，保持 kinds=None 的“全清”语义
+            if not has_any:
+                QMessageBox.information(self, "提示", "未检测到任何水印，无需清除。")
+                return
+            if not self._ask_clear_native():
+                return
+            # 用户确认 -> 全清（COM 始终全清）
+            self._run(lambda: core.clear_watermark(self.file_path, output_path=out, kinds=kinds))
+            return
+
+        # .docx 路径
+        try:
+            types = engine_docx.detect_watermark_types(self.file_path)
+        except Exception as e:
+            # 检测失败绝不退化成“扩大删除范围”：直接取消本次清除并向用户报告。
+            # 真正的原因同时写入日志，方便事后排查（不吞异常）。
+            log.exception("水印检测失败，已取消本次清除: %s", e)
+            QMessageBox.warning(
+                self, "提示",
+                "水印检测失败，为避免误删内容，已取消本次清除。\n\n"
+                f"错误：{type(e).__name__}: {e}")
+            return
+        if types == {"text", "image"}:
+            # 同时含两类水印：弹窗让用户逐项选择（行为与之前一致）
+            choice = self._ask_clear_choice()
+            if choice is None:        # 用户点了“取消”
+                return
+            kinds = {"text": ["text"], "image": ["image"],
+                     "both": ["text", "image"]}[choice]
+        elif types == {"text"}:
+            kinds = ["text"]          # 只有文字水印：只删文字，不扩大范围
+        elif types == {"image"}:
+            kinds = ["image"]         # 只有图片水印：只删图片，不扩大范围
+        # 空集：文档里没有本工具识别到的水印 —— 再查是否有 Word 原生水印
+        if not types:
+            try:
+                has_native = engine_docx.detect_native_watermark(self.file_path)
+            except Exception:
+                has_native = False
+            if not has_native:
+                QMessageBox.information(self, "提示", "未检测到任何水印，无需清除。")
+                return
+            if not self._ask_clear_native():
+                return
+            # 用户确认 -> kinds 保持 None，走全清（含原生水印）
         self._run(lambda: core.clear_watermark(self.file_path, output_path=out, kinds=kinds))
+
+    def _ask_clear_native(self) -> bool:
+        """弹窗确认是否清除「Word 原生水印」。
+
+        仅在“未检测到本工具(WriteMark)水印、但确有原生水印”或“.doc 无法区分”时调用。
+        默认按钮为「否」，安全优先——用户必须明确点击「是」才会删原生水印。
+        """
+        box = QMessageBox(self)
+        box.setWindowTitle("清除水印")
+        box.setIcon(QMessageBox.Question)
+        box.setText("未检测到 WriteMark 水印，是否尝试清除 Word 原生水印？")
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        box.setDefaultButton(QMessageBox.No)
+        return box.exec() == QMessageBox.Yes
 
     def _ask_clear_choice(self):
         """文档同时含文字/图片水印时弹出选择框，返回 'text' / 'image' / 'both' / None(取消)。"""

@@ -287,14 +287,29 @@ def test_gui_detection_failure_leaves_document_untouched(monkeypatch, app):
 
 
 # ===========================================================================
-# 空集：没有识别到本工具水印时的既有产品语义
+# 空集 / 原生水印：未检测到本工具水印时的安全守门（取代旧的“无脑全清”语义）
 # ===========================================================================
-def test_gui_no_watermark_detected_keeps_full_clear_semantics(monkeypatch, app):
-    """检测为空集：保持 kinds=None（「一键清除水印」连 Word 原生水印一起清）。
+def _build_native_only(tmp, name):
+    """返回 (file_path, output_path)：一份只有「Word 原生水印」（behindDoc 图片、无本工具标记）的 docx。"""
+    import io as _io
+    src = os.path.join(tmp, f"{name}.docx")
+    doc = Document()
+    doc.add_paragraph(USER_BODY)
+    doc.save(src)
+    d = Document(src)
+    rid, _ = d.sections[0].header.part.get_or_add_image(
+        _io.BytesIO(open(_svg_png(tmp, f"{name}.png"), "rb").read()))
+    engine_docx._add_drawing_to_part(
+        d.sections[0].header,
+        engine_docx._make_drawing(rid, 300000, 300000, 0, "用户背景图", "", 880, 0, 0))
+    d.save(src)
+    return src, os.path.join(tmp, f"{name}_out.docx")
 
-    这是产品决策（按钮语义就是“去掉水印”），不是缺陷；但它确实会清掉页眉里
-    用户自己的 behindDoc 图，属于已知取舍，故此处**只固化当前产品语义**，
-    不把它当成安全保证。
+
+def test_gui_no_watermark_no_native_informs_and_skips(monkeypatch, app):
+    """检测为空集且确实没有任何水印：提示「未检测到任何水印」并跳过，不再静默全清。
+
+    取代旧的「保持 kinds=None 全清语义」——那会连用户页眉里自己的 behindDoc 图一起删。
     """
     tmp = tempfile.mkdtemp()
     src = os.path.join(tmp, "plain.docx")
@@ -304,10 +319,42 @@ def test_gui_no_watermark_detected_keeps_full_clear_semantics(monkeypatch, app):
     doc.save(src)
     fp, out = src, os.path.join(tmp, "plain_out.docx")
 
+    _WARNINGS.clear()
+    monkeypatch.setattr(gui_mod, "QMessageBox", _FakeMessageBox)
+
     app, jobs = _stub_app(monkeypatch, fp, out)
     gui_mod.App._clear(app)
     calls = _apply(app, jobs, monkeypatch)
 
+    assert calls == [], "无任何水印时不应发起任何清除"
+    assert not os.path.exists(out), "不应产生输出文件"
+    assert any("未检测到任何水印" in t for _, t in _WARNINGS), (
+        f"应提示无内容可清，实际：{_WARNINGS}")
+    print("[GUI] 无工具水印且确无原生水印 -> 提示并跳过（不再静默全清）")
+
+
+def test_gui_no_tool_watermark_but_native_requires_confirm(monkeypatch, app):
+    """检测为空集、但有 Word 原生水印：必须先问用户，确认才全清、拒绝则不动。"""
+    tmp = tempfile.mkdtemp()
+    fp, out = _build_native_only(tmp, "native")
+    assert engine_docx.detect_watermark_types(fp) == set(), "该文档不应含本工具水印"
+    assert engine_docx.detect_native_watermark(fp) is True, "应检测到原生水印"
+
+    # 用户拒绝 -> 一次清除都不许发生
+    app, jobs = _stub_app(monkeypatch, fp, out)
+    monkeypatch.setattr(gui_mod.App, "_ask_clear_native", lambda self: False)
+    gui_mod.App._clear(app)
+    calls = _apply(app, jobs, monkeypatch)
+    assert calls == [], "用户拒绝时不应清除原生水印"
+    assert not os.path.exists(out), "用户拒绝时不应产生输出文件"
+    print("[GUI] 无工具水印但有原生 -> 拒绝 -> 不清除")
+
+    # 用户确认 -> 全清（kinds=None，含原生水印）
+    _WARNINGS.clear()
+    app, jobs = _stub_app(monkeypatch, fp, out)
+    monkeypatch.setattr(gui_mod.App, "_ask_clear_native", lambda self: True)
+    gui_mod.App._clear(app)
+    calls = _apply(app, jobs, monkeypatch)
     assert len(calls) == 1 and calls[0]["kinds"] is None, (
-        f"未检测到本工具水印时应保持 kinds=None（全清语义），实际 {calls}")
-    print("[GUI] 未检测到水印 -> kinds=None（保持“连原生水印一起清”的既有语义）")
+        f"确认后应全清（kinds=None，含原生水印），实际 {calls}")
+    print("[GUI] 无工具水印但有原生 -> 确认 -> 全清")

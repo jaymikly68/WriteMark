@@ -96,7 +96,11 @@ def insert_watermark(src_path: str, kinds, output_path: str = None,
       副本上清除本工具写入的水印图形（不动正文），再重新写入——保留用户在输出
       文件上的正文/表格/图片修改（例如用户改过 output 后再次插入水印时只补水印、
       不覆盖原文）。
-    - 返回 dict 内含 "output" 字段，标明实际写出位置。
+
+    【历史兼容代码】该参数最初为「后台守护(watchdog)的补回」逻辑引入，守护功能已下线
+    后**当前没有生产调用方**；保留不动是出于安全与可复用考虑（若日后 GUI 复用
+    “在现有输出上补水印且不覆盖用户修改”的语义，可直接传 True）。请勿删除，
+    相关不变式测试见 tests/unit/test_preserve_existing.py。
     """
     src_path = os.path.abspath(src_path)
     if output_path is None:
@@ -105,6 +109,7 @@ def insert_watermark(src_path: str, kinds, output_path: str = None,
     # 本次是否「复用已有 output」：不读 source、也不从 source 复制，只在现有 output 上动。
     # 由此可以省掉 source 的占用检查——否则用户在 Word/WPS 里打开 source 时，
     # 守护的补回（本来就只操作 output）会被误报成“文件正被占用”而整体失败。
+    # 【历史兼容】preserve_existing 原为守护补回引入，当前无调用方，仅保留此分支。
     reuse_existing = bool(preserve_existing and os.path.exists(output_path))
     if not reuse_existing:
         _ensure_not_locked(src_path)

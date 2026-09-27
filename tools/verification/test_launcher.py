@@ -18,6 +18,8 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# launcher.py 在项目根；直接以脚本方式运行本文件时根目录不在 sys.path，需要显式加入
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")))
 TITLE = "一键水印工具（Word / 视频）"
 APP_EXE_NAME = "WriteMarkApp.exe"
 # 版本号必须与 launcher.py 保持一致：写死会随着版本演进而失配（曾在 1.1.7 踩过）
