@@ -5,20 +5,29 @@
 """
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 
 from . import engine_docx, engine_com
 
+log = logging.getLogger(__name__)
+
 
 def get_desktop() -> str:
-    """返回当前用户的桌面路径；若取不到则返回源文件所在目录。"""
+    """返回当前用户的桌面路径；若取不到则返回源文件所在目录。
+
+    说明：此前用 `except Exception: pass` 静默吞掉所有异常，会藏匿真实的
+    IO/环境错误。这里收窄为文件操作可能抛出的 (OSError, ValueError)，
+    其余异常（多为代码 bug）会正常向上传播，便于排查；找不到桌面时
+    仍按设计回退到源文件目录（返回 None，由调用方处理）。
+    """
     try:
         desk = os.path.join(os.path.expanduser("~"), "Desktop")
         if os.path.isdir(desk):
             return desk
-    except Exception:
-        pass
+    except (OSError, ValueError) as e:
+        log.debug("定位桌面目录失败，将回退到源文件目录: %s", e)
     return None
 
 
@@ -76,12 +85,16 @@ def _use_com(path: str) -> bool:
     return False
 
 
-def insert_watermark(src_path: str, kinds, output_path: str = None, **opts) -> dict:
+def insert_watermark(src_path: str, kinds, output_path: str = None,
+                     preserve_existing: bool = False, **opts) -> dict:
     """
     插入水印。kinds 为包含 'text' / 'image' 的列表，可同时含两者（同时添加两类水印）。
     默认【不破坏原文件】：复制到 output_path 后在副本上操作。
     - output_path 为 None：默认输出到桌面/<原名>WaterMark<ext>。
     - 若 output_path 与源文件相同：自动加后缀，避免覆盖原文件。
+    - preserve_existing=True：当 output_path 已存在时不从源文件覆盖，而是先在现有
+      副本上清除本工具写入的水印图形（不动正文），再重新写入——用于后台守护“补回”
+      场景，避免覆盖用户在输出文件上的正文修改。
     - 返回 dict 内含 "output" 字段，标明实际写出位置。
     """
     src_path = os.path.abspath(src_path)
@@ -97,10 +110,20 @@ def insert_watermark(src_path: str, kinds, output_path: str = None, **opts) -> d
     if _use_com(src_path):
         if not com_available():
             raise RuntimeError("处理 .doc 需要本机安装 Microsoft Word。")
-        res = engine_com.insert_watermark(src_path, kinds, output_path=output_path, **opts)
+        if preserve_existing and output_path and os.path.exists(output_path):
+            # 守护补回：在现有输出上先清后插，保留正文修改（.doc 仅 Windows+Word 可用）
+            engine_com.clear_watermark(output_path, output_path=output_path)
+            res = engine_com.insert_watermark(output_path, kinds, output_path=output_path, **opts)
+        else:
+            res = engine_com.insert_watermark(src_path, kinds, output_path=output_path, **opts)
     else:
-        shutil.copy2(src_path, output_path)  # 保留原文件，在新副本上加水印
-        res = engine_docx.insert_watermark(output_path, kinds, **opts)
+        if preserve_existing and output_path and os.path.exists(output_path):
+            # 守护补回：在现有输出上先清后插，保留正文修改（只清本工具的水印图形）
+            engine_docx.clear_watermark(output_path)
+            res = engine_docx.insert_watermark(output_path, kinds, **opts)
+        else:
+            shutil.copy2(src_path, output_path)  # 保留原文件，在新副本上加水印
+            res = engine_docx.insert_watermark(output_path, kinds, **opts)
     if isinstance(res, dict):
         res["output"] = output_path
     return res

@@ -340,7 +340,34 @@ def add_video_watermark(src: str, output: str, opts: dict,
                     break
             if progress_fn is not None and total:
                 progress_fn(min(frame_idx, total), total)
+        # 先关闭 writer 把缓冲刷盘，否则下面的 _mux_audio 读到的临时文件可能不完整
+        writer.close()
+        frames_done = out_idx
+        if frames_done == 0:
+            raise RuntimeError("未能从视频中读出任何帧，请确认文件是有效的视频。")
+
+        # ---- 保留原音轨：用自带的 ffmpeg 重新封装（音视频都 copy，不重编码） ----
+        muxed = _mux_audio(tmp_vid, src, output)
+        if muxed:
+            if os.path.exists(tmp_vid):
+                os.remove(tmp_vid)
+        else:
+            # mux 失败（如无音频流或 ffmpeg 异常）则退化为无声视频
+            try:
+                if os.path.abspath(tmp_vid) != os.path.abspath(output):
+                    os.replace(tmp_vid, output)
+            except Exception:
+                pass
+
+        # 返回“实际生效”的播放方式合集：逐类型覆盖会让实际叠加方式多于全局选择
+        used = sorted({m for s in layers for m in (s.get("motions") or motions)})
+        return {"ok": True, "engine": "video", "frames": frames_done,
+                "output": output, "motion": "+".join(used),
+                "size": (W, H), "fps": round(out_fps, 3), "crf": crf}
     finally:
+        # 无论正常完成还是中途异常，读写器都要关闭；临时无声文件只要还在
+        # （未被 os.replace 改名成成品、也未被上面的 mux 分支删除）就必须清理，
+        # 否则处理中途失败会在 %TMP% 下残留大量 .mp4 临时文件（风险 j）。
         try:
             writer.close()
         except Exception:
@@ -349,31 +376,11 @@ def add_video_watermark(src: str, output: str, opts: dict,
             reader.close()
         except Exception:
             pass
-
-    frames_done = out_idx
-    if frames_done == 0:
         if os.path.exists(tmp_vid):
-            os.remove(tmp_vid)
-        raise RuntimeError("未能从视频中读出任何帧，请确认文件是有效的视频。")
-
-    # ---- 保留原音轨：用自带的 ffmpeg 重新封装（音视频都 copy，不重编码） ----
-    muxed = _mux_audio(tmp_vid, src, output)
-    if muxed:
-        if os.path.exists(tmp_vid):
-            os.remove(tmp_vid)
-    else:
-        # mux 失败（如无音频流或 ffmpeg 异常）则退化为无声视频
-        try:
-            if os.path.abspath(tmp_vid) != os.path.abspath(output):
-                os.replace(tmp_vid, output)
-        except Exception:
-            pass
-
-    # 返回“实际生效”的播放方式合集：逐类型覆盖会让实际叠加方式多于全局选择
-    used = sorted({m for s in layers for m in (s.get("motions") or motions)})
-    return {"ok": True, "engine": "video", "frames": frames_done,
-            "output": output, "motion": "+".join(used),
-            "size": (W, H), "fps": round(out_fps, 3), "crf": crf}
+            try:
+                os.remove(tmp_vid)
+            except Exception:
+                pass
 
 
 def _mux_audio(tmp_vid: str, src: str, output: str) -> bool:

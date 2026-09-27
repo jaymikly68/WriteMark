@@ -137,14 +137,22 @@ _VARIANT_RE = re.compile(
 _KEEP_VARIANT_RE = re.compile(r"\b(light|black)\b", re.IGNORECASE)
 
 
+_INDEX_MAP: dict[str, int] = {}
+
+
 def build_font_map() -> dict[str, str]:
     """返回 {字体显示名: 绝对字体文件路径}。
 
     来源：HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts
     注册表值名即“显示名”，值即文件名（可能带盘符/目录，或相对 Fonts 目录，
-    也可能形如 "msyh.ttc,0" 表示集合内索引）。非 Windows 或读取失败返回空字典。
+    也可能形如 "msyh.ttc,1" 表示字体集合(TTC)内的第 1 个 face）。非 Windows 或读取失败返回空字典。
+
+    副作用：同时填充模块级 _INDEX_MAP[显示名] = TTC 内的 face 索引（无索引为 0），
+    供 font_index_of() 取用，避免多 face TTC（如“微软雅黑 Light”）被错加载成第 0 面。
     """
+    global _INDEX_MAP
     mapping: dict[str, str] = {}
+    _INDEX_MAP = {}
     try:
         import winreg
     except Exception:
@@ -168,12 +176,24 @@ def build_font_map() -> dict[str, str]:
         i += 1
         if not name or not value:
             continue
-        path = str(value).split(",")[0].strip()  # 去掉 ",索引"
+        # 注册表值可能形如 "msyh.ttc,1" 表示 TTC 内第 1 个 face。此前直接用
+        # split(",")[0] 丢掉索引，导致多 face TTC 永远只加载第 0 面（风险 k）。
+        # 这里把文件系统路径与 face 索引分开：路径用于加载，索引供 Pillow 的
+        # ImageFont.truetype(..., index=) 使用。
+        parts = str(value).strip().split(",")
+        path = parts[0].strip()            # 文件系统路径
+        idx = 0
+        if len(parts) > 1:
+            try:
+                idx = int(parts[1].strip())
+            except ValueError:
+                idx = 0
         if not path:
             continue
         if not os.path.isabs(path):
             path = os.path.join(fonts_dir, path)
         mapping[name] = path
+        _INDEX_MAP[name] = idx
     return mapping
 
 
@@ -258,6 +278,33 @@ def resolve_font_path(font_name: str | None) -> str | None:
         if target in nd or nd in target:
             return path
     return None
+
+
+def font_index_of(font_name: str | None) -> int:
+    """返回某显示名对应的 TTC face 索引（非 TTC / 未知时返回 0）。
+
+    与 resolve_font_path 走相同的解析顺序（中文别名表 → 注册表精确 → 注册表宽松），
+    以便返回的索引与 resolve_font_path 解析出的字体文件互相匹配。供 Pillow 的
+    ImageFont.truetype(..., index=) 使用，避免多 face 字体（如“微软雅黑 Light”
+    对应 msyh.ttc 的第 1 面）被错加载成第 0 面（风险 k）。
+    """
+    if not font_name:
+        return 0
+    target = _norm(font_name)
+    if not target:
+        return 0
+    # 中文别名表指向的通常是专用字体文件（单 face），其第 0 面即所求
+    if target in _ALIAS_FILES:
+        return 0
+    mapping = _get_map()
+    for disp, _path in mapping.items():
+        if _norm(disp) == target:
+            return _INDEX_MAP.get(disp, 0)
+    for disp, _path in mapping.items():
+        nd = _norm(disp)
+        if target in nd or nd in target:
+            return _INDEX_MAP.get(disp, 0)
+    return 0
 
 
 def localized_font_names() -> list[str]:

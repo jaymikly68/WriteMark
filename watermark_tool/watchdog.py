@@ -38,9 +38,16 @@ class WatermarkWatchdog:
         self.running = False
 
     def _reinsert(self):
-        """从原文件重新生成/补齐水印，并同步期望份数。"""
+        """从原文件重新生成/补齐水印，并同步期望份数。
+
+        风险处理（f）：此前一律从源文件重新生成输出，若用户在输出文件上做过
+        正文修改，补回水印时会把那些修改一并覆盖掉。这里改用 preserve_existing：
+        输出文件存在时仅在现有副本上“先清本工具水印、再重插”，正文修改得以保留；
+        仅当输出文件被整体删除（不存在）时才从源文件重建。
+        """
         res = core.insert_watermark(self.src_path, self.kinds,
-                                    output_path=self.output_path, **self.opts)
+                                    output_path=self.output_path,
+                                    preserve_existing=True, **self.opts)
         if isinstance(res, dict) and res.get("inserted"):
             self.expected = int(res["inserted"])
         return res

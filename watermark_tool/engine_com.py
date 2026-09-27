@@ -11,7 +11,10 @@ Word COM 水印引擎（需要本机安装 Microsoft Word）。
 """
 from __future__ import annotations
 
+import logging
 import os
+
+log = logging.getLogger(__name__)
 
 # Word 常量
 from .engine_docx import decoy_name, tile_layout
@@ -64,13 +67,13 @@ def _header_indices(doc, sec):
     try:
         if doc.PageSetup.OddAndEvenPagesHeaderFooter:
             idxs.append(WD_HEADER_FOOTER_EVEN_PAGES)
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("读取奇偶页页眉设置失败（跳过）: %s", e)
     try:
         if sec.PageSetup.DifferentFirstPageHeaderFooter:
             idxs.append(WD_HEADER_FOOTER_FIRST_PAGE)
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("读取首页不同页眉设置失败（跳过）: %s", e)
     return idxs
 
 
@@ -83,12 +86,12 @@ def _tag(shape, mark, disp_name=None):
     """
     try:
         shape.Name = disp_name or mark
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("设置水印形状 Name 失败（将影响识别与清除）: %s", e)
     try:
         shape.AlternativeText = mark
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("设置水印形状 AlternativeText 标记失败（将影响识别与清除）: %s", e)
 
 
 def _is_ours(shape):
@@ -97,11 +100,12 @@ def _is_ours(shape):
         nm = shape.Name
         if nm in MARK_NAMES:
             return True
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("读取形状 Name 失败: %s", e)
     try:
         return shape.AlternativeText in MARK_NAMES
-    except Exception:
+    except Exception as e:
+        log.debug("读取形状 AlternativeText 失败: %s", e)
         return False
 
 
@@ -126,8 +130,8 @@ def _add_text_watermark(header, text, cn_font_name, latin_font_name, font_size,
             tf.NameFarEast = cn_font_name
             if latin_font_name:
                 tf.Name = latin_font_name
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("设置中/西文字体失败（使用 Word 默认字体）: %s", e)
     return shape
 
 
@@ -139,8 +143,8 @@ def _add_image_watermark(header, image_path, angle, transparency, disp_name=None
     shape.Rotation = angle
     try:
         shape.PictureFormat.Transparency = transparency
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("设置图片水印透明度失败（图片可能不透明）: %s", e)
     shape.Line.Visible = False
     shape.WrapFormat.Type = WD_WRAP_NONE
     shape.ZOrder(MSO_SEND_BEHIND_TEXT)
@@ -157,8 +161,8 @@ def _center(shape, page_w, page_h, offset_x=0.0, offset_y=0.0):
         cy = (page_h - shape.Height) / 2 + offset_y / 100.0 * page_h
         shape.Left = cx
         shape.Top = cy
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("水印居中定位失败（位置可能偏移）: %s", e)
 
 
 def _remove_in_header(header, clear_any=False):
@@ -175,14 +179,14 @@ def _remove_in_header(header, clear_any=False):
             nm = ""
             try:
                 nm = (s.Name or "").lower()
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug("读取形状 Name 失败: %s", e)
             is_native = (not is_ours) and clear_any and ("watermark" in nm)
             if is_ours or is_native:
                 s.Delete()
                 removed += 1
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("删除水印形状失败（可能残留）: %s", e)
     return removed
 
 
@@ -212,12 +216,14 @@ def _iter_doc_parts(doc, redundant=False):
         for hf in _header_indices(doc, sec):
             try:
                 yield sec.Headers(hf), page_w, page_h
-            except Exception:
+            except Exception as e:
+                log.debug("读取页眉失败（跳过该页眉）: %s", e)
                 continue
             if redundant:
                 try:
                     yield sec.Footers(hf), page_w, page_h
-                except Exception:
+                except Exception as e:
+                    log.debug("读取页脚失败（跳过该页脚）: %s", e)
                     continue
 
 
@@ -234,8 +240,8 @@ def _place(shape, x, y, w=None, h=None):
             shape.Height = h
         shape.Left = x
         shape.Top = y
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("水印绝对定位失败（位置可能偏移）: %s", e)
 
 
 # ---------------------------------------------------------------------------

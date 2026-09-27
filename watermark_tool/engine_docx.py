@@ -191,14 +191,19 @@ def render_text_png(text: str, font_size: int, color, alpha: int,
     if latin_path is None:
         latin_path = fallback_path
 
-    def _load(p):
+    def _load(p, index=0):
         try:
-            return ImageFont.truetype(p, font_size) if p else ImageFont.load_default()
+            # index= 用于 TTC 多 face 字体（如“微软雅黑 Light”对应 msyh.ttc 第 1 面）；
+            # 非 TTC 字体 index=0 即默认行为，与改动前一致（风险 k）。
+            return ImageFont.truetype(p, font_size, index=index) if p else ImageFont.load_default()
         except Exception:
             return ImageFont.load_default()
 
-    cn_font = _load(cn_path)
-    latin_font = _load(latin_path)
+    # 解析用户所选中/西文字体对应的 TTC face 索引，保证多 face 集合字体的正确字重被加载
+    cn_index = word_fonts.font_index_of(cn_font_name) if cn_font_name else 0
+    latin_index = word_fonts.font_index_of(latin_font_name) if latin_font_name else 0
+    cn_font = _load(cn_path, cn_index)
+    latin_font = _load(latin_path, latin_index)
     fallback_font = _load(fallback_path) if fallback_path else cn_font
 
     r, g, b = parse_color(color)
@@ -485,13 +490,27 @@ _remove_in_header = _remove_in_part
 
 
 def _add_drawing_to_part(part, drawing):
-    """把 drawing 追加到页眉/页脚的一个新 run 中（必要时先创建独立 part）。"""
+    """把 drawing 追加到页眉/页脚的一个新 run 中（必要时先创建独立 part）。
+
+    注意（私有 API 依赖，风险 g）：`r._r` 是 python-docx 的“私有”内部属性（CT_R 元素）。
+    python-docx 没有公开 API 能把一个现成的 DrawingML anchor 注入到 run 里
+    （`run.add_picture` 只能新建行内图片，而水印需要“衬于文字下方 behindDoc”的
+    浮动型 anchor），因此这里只能用内部属性。一旦 python-docx 大版本改动 CT_R 结构，
+    这里可能失效——下面针对 AttributeError 做了可读的错误提示，便于第一时间定位，
+    而不是抛出晦涩的底层异常。成功路径与历史 XML 格式完全一致，行为不变。
+    """
     # 触发 python-docx 为“链接到前一节”的页眉/页脚创建独立 part
     if not part.paragraphs:
         part.add_paragraph()
     p = part.paragraphs[0]
     r = p.add_run()
-    r._r.append(drawing)
+    try:
+        r._r.append(drawing)
+    except AttributeError as e:  # python-docx 内部结构变动导致 _r 不可用
+        raise RuntimeError(
+            "无法将水印图形写入页眉/页脚：python-docx 内部接口(_r)不可用，"
+            "可能是 python-docx 版本不兼容，请升级本工具或固定 python-docx 版本。"
+        ) from e
 
 
 # 兼容旧调用名
