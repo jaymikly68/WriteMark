@@ -12,6 +12,7 @@ import os
 import sys
 import tempfile
 import numpy as np
+import pytest
 import imageio.v2 as iio
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -570,6 +571,71 @@ def test_gui_motion_and_kind_matrix():
     assert "固定+滚动" in [w.v_text_motion_combo.itemText(i)
                             for i in range(w.v_text_motion_combo.count())]
     print("GUI 播放方式 x 水印类型 搭配 PASS")
+
+
+# ---------------------------------------------------------------------------
+# 取消语义：取消 ≠ 成功，也 ≠ 失败
+# ---------------------------------------------------------------------------
+def test_video_cancel_produces_no_output_file():
+    """用户点「取消」后：**不能**留下一个截断的成品文件。
+
+    历史缺陷：取消只是从读帧循环 break，随后照常走完「关 writer → 封装音轨 →
+    写出 output」，于是用户取消后得到一个不到 1 秒的短视频，界面还弹
+    「任务已完成」。取消必须走专用异常，让成品文件根本不生成。
+    """
+    import glob
+    from watermark_tool import video
+
+    d = tempfile.mkdtemp()
+    src = os.path.join(d, "src.mp4")
+    _make_video(src, N=48)          # 2 秒 @24fps，足够在中间取消
+    out = os.path.join(d, "out.mp4")
+
+    tmpdir = tempfile.gettempdir()
+    before = set(glob.glob(os.path.join(tmpdir, "*.mp4")))
+
+    calls = {"n": 0}
+
+    def stop_after_first_frame():
+        calls["n"] += 1
+        return calls["n"] >= 2      # 第 1 帧照常处理，第 2 帧起取消
+
+    with pytest.raises(video.WatermarkCancelled):
+        video.add_video_watermark(src, out, {
+            "kinds": ["text"],
+            "text": {"text": "机密", "color": (255, 0, 0), "alpha": 200},
+        }, stop_check=stop_after_first_frame)
+
+    assert not os.path.exists(out), (
+        "取消后不应生成成品文件——否则用户会拿到一个截断的视频")
+    after = set(glob.glob(os.path.join(tmpdir, "*.mp4")))
+    assert after - before == set(), (
+        f"取消后 %TMP% 残留了新的 mp4 临时文件：{after - before}")
+    print("[video] 取消 -> 抛 WatermarkCancelled，无成品文件、无临时残留")
+
+
+def test_gui_video_cancel_emits_cancelled_not_success():
+    """GUI 侧：取消必须走 cancelled_signal，绝不能 emit 成功/失败。"""
+    from PySide6.QtCore import QCoreApplication
+    from watermark_tool.gui import VideoWorker
+
+    d = tempfile.mkdtemp()
+    src = os.path.join(d, "src.mp4")
+    _make_video(src, N=48)
+    out = os.path.join(d, "out.mp4")
+
+    w = VideoWorker(src, out, {"kinds": ["text"],
+                               "text": {"text": "机密", "alpha": 200}})
+    got = {"ok": [], "cancel": 0}
+    w.result_signal.connect(lambda ok, msg: got["ok"].append((ok, msg)))
+    w.cancelled_signal.connect(lambda: got.update(cancel=got["cancel"] + 1))
+    w.request_stop()          # 模拟用户点了「取消」
+    w.run()                   # 同步执行，避免测试里的线程竞态
+
+    assert got["cancel"] == 1, f"取消应触发一次 cancelled_signal，实际 {got}"
+    assert got["ok"] == [], f"取消不应被当成成功/失败上报，实际 {got['ok']}"
+    assert not os.path.exists(out), "取消后不应产生输出文件"
+    print("[gui] 视频取消 -> cancelled_signal，状态栏显示“已取消”而非“任务已完成”")
 
 
 if __name__ == "__main__":

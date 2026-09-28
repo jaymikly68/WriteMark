@@ -373,12 +373,19 @@ class Worker(QThread):
     log_signal = Signal(str)
     result_signal = Signal(bool, str)
 
-    def __init__(self, fn):
+    def __init__(self, fn, pre_hook=None):
         super().__init__()
         self.fn = fn
+        # 【仅测试用】pre_hook 在真正执行任务**之前**调用，用来制造一个可控的
+        # “任务仍在跑”的时间点，从而自动化测试「插入/清除进行中关闭窗口」。
+        # 生产路径永远是 None —— 绝不给真实插入流程加任何 sleep 或降速，
+        # 用户实测 30 页插入只要一两秒，那是正常速度，不是缺陷。
+        self.pre_hook = pre_hook
 
     def run(self):
         try:
+            if self.pre_hook is not None:
+                self.pre_hook()
             res = self.fn()
             self.log_signal.emit(f"操作成功：{res}")
             self.result_signal.emit(True, str(res))
@@ -431,6 +438,9 @@ class VideoWorker(QThread):
     """后台逐帧处理视频水印：支持进度回传与中途取消。"""
     result_signal = Signal(bool, str)
     progress_signal = Signal(int, int)   # (当前帧, 总帧数)
+    # 取消是**用户主动终止**，与失败(ok=False)严格区分：失败要弹红叉错误框，
+    # 取消只应把状态栏改成「已取消」，绝不能弹「任务已完成」
+    cancelled_signal = Signal()
 
     def __init__(self, src, output, opts, max_seconds=None):
         super().__init__()
@@ -454,6 +464,9 @@ class VideoWorker(QThread):
                 max_seconds=self.max_seconds,
             )
             self.result_signal.emit(True, str(res))
+        except video_mod.WatermarkCancelled:
+            # 用户点取消：不生成成品文件，也不当作失败
+            self.cancelled_signal.emit()
         except Exception as e:
             self.result_signal.emit(False, str(e))
 
@@ -2206,6 +2219,7 @@ class App(QMainWindow):
         self._v_worker = w
         w.result_signal.connect(self._v_on_result)
         w.progress_signal.connect(self._v_on_progress)
+        w.cancelled_signal.connect(self._v_on_cancelled)
         w.finished.connect(self._v_on_finished)
         w.start()
 
@@ -2223,6 +2237,15 @@ class App(QMainWindow):
         else:
             self.v_status_lbl.setText(i18n.trf("失败：{msg}", msg=msg))
             QMessageBox.critical(self, i18n.tr("失败"), msg)
+
+    def _v_on_cancelled(self):
+        """用户中途取消导出：状态栏明确写“已取消”，不弹「任务已完成」。
+
+        与失败区分开：这里既不是成功也不是错误，界面不该弹任何对话框——
+        用户是自己点的取消，弹「任务已完成」会让人误以为成品已经导出好了。
+        """
+        self.v_status_lbl.setText(i18n.tr("已取消：未生成输出文件"))
+        self.v_progress.setVisible(False)
 
     def _v_on_finished(self):
         self._v_worker = None
@@ -2866,7 +2889,8 @@ class App(QMainWindow):
             return
         self._append_log("正在处理...")
         self._set_busy(True)
-        w = Worker(fn)
+        # _test_worker_hook 只由测试注入（见 Worker.pre_hook 说明），生产恒为 None
+        w = Worker(fn, pre_hook=getattr(self, "_test_worker_hook", None))
         self._worker = w  # 关键：必须保住引用，否则线程运行中对象被 GC → 进程崩溃退出
         w.log_signal.connect(self._append_log)
         w.result_signal.connect(self._on_result)

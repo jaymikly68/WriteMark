@@ -333,6 +333,32 @@ def test_gui_no_watermark_no_native_informs_and_skips(monkeypatch, app):
     print("[GUI] 无工具水印且确无原生水印 -> 提示并跳过（不再静默全清）")
 
 
+def test_gui_dual_watermark_plus_user_native_spares_user_art(monkeypatch, app):
+    """WriteMark 文字+图片 与 用户自己的 behindDoc 图共存：
+    即便用户选「文字和图片水印都去除」，用户的图也必须留着。
+
+    这是规格第七条的硬边界：**不能因为存在 WriteMark 标记就把用户对象一起删**。
+    kinds 模式下清除只认私有标记，原生/用户图形一概不碰。
+    """
+    tmp = tempfile.mkdtemp()
+    fp, out = _build(tmp, "dual_user", ["text", "image"], with_user_behind=True)
+    assert _user_behind_count(fp) == 1, "前置：文档里应有 1 张用户自己的 behindDoc 图"
+
+    app, jobs = _stub_app(monkeypatch, fp, out)
+    monkeypatch.setattr(gui_mod.App, "_ask_clear_choice", lambda self: "both")
+    gui_mod.App._clear(app)
+    calls = _apply(app, jobs, monkeypatch)
+
+    assert len(calls) == 1 and calls[0]["kinds"] == ["text", "image"]
+
+    core.clear_watermark(fp, output_path=out, kinds=["text", "image"])
+    assert engine_docx.detect_watermark_types(out) == set(), "两种 Watermark 水印都应清除"
+    assert _user_behind_count(out) == 1, \
+        "用户自己的 behindDoc 图必须保留——marker 与用户内容必须始终可区分"
+    assert USER_BODY in [p.text for p in Document(out).paragraphs], "正文必须保留"
+    print("[GUI] 双水印+用户图：选“都去除” -> 只删本工具水印，用户图保留")
+
+
 def test_gui_no_tool_watermark_but_native_requires_confirm(monkeypatch, app):
     """检测为空集、但有 Word 原生水印：必须先问用户，确认才全清、拒绝则不动。"""
     tmp = tempfile.mkdtemp()
