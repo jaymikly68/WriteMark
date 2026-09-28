@@ -53,6 +53,30 @@ class WatermarkCancelled(Exception):
     """
 
 
+# 临时视频文件统一加可识别前缀，便于「关闭/崩溃后」回收，避免孤立 mp4 留在 %TMP%。
+_WM_TMP_PREFIX = "writemark_wm_"
+
+
+def cleanup_video_temp_files():
+    """清理 %TMP% 下本工具遗留的临时 mp4（关闭窗口被 terminate、或上次崩溃时未能
+    走完 finally 的孤儿文件）。文件名带专属前缀，不会误删其它程序的临时文件。
+
+    该函数在三处被调用：① 每次导出开始时（自愈上次崩溃的残留）；② GUI 关闭窗口时
+    （回收本次关闭被打断的导出临时文件）；③ launcher 启动时。调用都是 best-effort，
+    单文件删除失败不影响整体。
+    """
+    try:
+        d = tempfile.gettempdir()
+        for fn in os.listdir(d):
+            if fn.startswith(_WM_TMP_PREFIX) and fn.endswith(".mp4"):
+                try:
+                    os.remove(os.path.join(d, fn))
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # 图层构造：把“一份水印”渲染成与帧尺寸相关的 RGBA 图层（透明）
 # ---------------------------------------------------------------------------
@@ -268,6 +292,9 @@ def add_video_watermark(src: str, output: str, opts: dict,
     if not os.path.exists(src):
         raise FileNotFoundError(f"视频不存在: {src}")
 
+    # 导出前先回收上次崩溃/被强关遗留的临时 mp4（自愈，避免 %TMP% 无限堆积）
+    cleanup_video_temp_files()
+
     kinds = [k for k in opts.get("kinds", ["text", "image"]) if k in ("text", "image")]
     if not kinds:
         raise ValueError("未启用任何水印类型。")
@@ -326,9 +353,12 @@ def add_video_watermark(src: str, output: str, opts: dict,
         per_type = _normalize_motion(cfg.get("motion"))
         spec["motions"] = per_type or list(motions)
 
-    # 先写到临时无声视频，最后再 mux 原音轨
-    tmp_fd, tmp_vid = tempfile.mkstemp(suffix=".mp4")
-    os.close(tmp_fd)
+    # 先写到临时无声视频，最后再 mux 原音轨。
+    # 用带专属前缀的 tempfile.mkstemp 建临时文件：① 文件名带 writemark_wm_ 前缀，
+    # 便于 cleanup_video_temp_files() 在崩溃/强关后回收；② 仍走标准 mkstemp（落在 %TMP%），
+    # 与既有回归测试对 video.tempfile.mkstemp 的桩兼容。
+    fd, tmp_vid = tempfile.mkstemp(suffix=".mp4", prefix=_WM_TMP_PREFIX)
+    os.close(fd)
     # ⚠ 下面这行 get_writer 必须包在 try 里。此前它在 try 之外：一旦
     # iio.get_writer 自己抛异常（自带的 ffmpeg 二进制缺失/损坏、参数不被接受），
     # 刚建的那个空临时 mp4 就没人清理，会在 %TMP% 下留下一个 0 字节孤儿。

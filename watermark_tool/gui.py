@@ -2934,6 +2934,15 @@ class App(QMainWindow):
         killer.daemon = True
         killer.start()
 
+        # 回收视频导出的临时 mp4：关闭窗口时若视频 worker 被 terminate 强杀，
+        # 其 finally 可能来不及执行、%TMP% 会残留孤立临时文件；这里主动扫一遍
+        # 本工具专属前缀的临时文件并清理（best-effort，关闭即退出，残留无意义）。
+        try:
+            from watermark_tool import video as _video_mod
+            _video_mod.cleanup_video_temp_files()
+        except Exception:
+            pass
+
         # 字体读取线程：一次性、可安全终止
         fw = getattr(self, "_font_worker", None)
         if fw is not None and fw.isRunning():

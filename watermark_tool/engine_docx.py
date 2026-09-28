@@ -1,11 +1,15 @@
 """
 docx 纯 Python 水印引擎（无需安装 Word 即可处理 .docx）。
 
-水印实现思路：
-- Word 的水印本质是“垫在页眉里、衬于文字下方(behindDoc)的半透明图形”。
-- 文本水印：先用 Pillow 把文字渲染成透明 PNG（含颜色/透明度），再作为一个
-  锚定(anchor)、旋转、衬于文字下方的图形插入每一节的页眉。
-- 图像水印：把用户图片转成带透明度的 PNG，同样方式插入。
+水印实现思路（v1.6.2 起）：
+- Word 的水印本质是“半透明图形”。v1.6.1 及更早版本放在**页眉**并衬于文字下方；
+  但 Word 跨层绘制顺序固定为“先页眉后正文”，正文图片（inline/浮动/behindDoc）
+  始终落在页眉水印之上，导致水印经过正文图片区域时被遮挡。
+- 要让“水印显示在正文主要内容之上”，唯一可靠做法是把水印放进**正文 body**，
+  并设为 behindDoc="0"（浮于文字之上）、relativeHeight 取最大值。文本/图像水印
+  都作为浮动(anchor)图形锚定到正文的每一个段落（positionV/H 以页面为基准），
+  因此每个段落所在页都会渲染出一份、重叠成视觉上的一份 —— 既覆盖每一页，
+  又保证水印压在正文图片之上。
 - 文本与图像水印可同时添加：文本用标记 MARK_TEXT、图像用标记 MARK_IMG，
   二者互不影响、可独立叠加；清除时只删带本工具标记的元素，绝不动正文/用户图片。
 
@@ -329,21 +333,29 @@ def prepare_image_png(path: str, alpha: int, page: int = 1) -> Image.Image:
 # DrawingML 构造
 # ---------------------------------------------------------------------------
 def _make_drawing(rId: str, cx: int, cy: int, rot_deg: float, name: str, descr: str,
-                 docpr_id: int, pos_x: int, pos_y: int) -> etree._Element:
-    """构造一个衬于文字下方、可旋转、按绝对坐标定位的锚定图形 XML。
+                 docpr_id: int, pos_x: int, pos_y: int, behind: str = "1",
+                 rel_h: str = "251658240") -> etree._Element:
+    """构造一个可旋转、按绝对坐标定位、以页面为基准的锚定图形 XML。
 
     pos_x / pos_y 为图形左上角相对页面原点（页面左上角）的 EMU 坐标，
     由调用方根据“居中基准 + 百分比偏移”算出，从而支持上下左右独立调整。
 
     name 为对外显示名（加固时用伪装名，避免被“删除水印”按名字抓走），
     descr 存本工具的私有标记——Word 会保留该标准属性，故识别与清除不受影响。
+
+    behind / rel_h 控制绘制层级：
+    - v1.6.2 起水印写在**正文 body**（而非页眉），并默认 behind="0"（浮于文字之上）、
+      rel_h 取到最大值，从而让水印显示在正文图片之上（满足“水印不被正文图片遮挡”）。
+      之所以必须离开页眉：Word 跨层绘制顺序固定为“先页眉后正文”，页眉里的图形
+      永远落在正文之下，仅改 behindDoc/relativeHeight 无法跨层。
+    - 识别/清除只依赖 descr 上的私有标记，与 behind 无关（见 test_watermark_layer）。
     """
     drawing = etree.Element(qn("w:drawing"))
     anchor = etree.SubElement(
         drawing, qn("wp:anchor"),
         {
             "distT": "0", "distB": "0", "distL": "0", "distR": "0",
-            "simplePos": "0", "relativeHeight": "0", "behindDoc": "1",
+            "simplePos": "0", "relativeHeight": rel_h, "behindDoc": behind,
             "locked": "0", "layoutInCell": "1", "allowOverlap": "1",
         },
     )
@@ -654,13 +666,67 @@ def _add_drawing_to_part(part, drawing):
 _add_drawing_to_header = _add_drawing_to_part
 
 
+def _add_drawing_to_paragraph(paragraph, drawing):
+    """把 drawing 挂到正文段落里（与 _add_drawing_to_part 同理，但落点在 body）。
+
+    水印 v1.6.2 起改放正文：浮动图形锚定到段落、positionV/H 以页面为基准，
+    因此段落所在页会渲染出一份水印。私有 API 依赖 r._r 同 _add_drawing_to_part。
+
+    优先挂到段落「最后一个已有 run」，避免给每个段落都新增一个空 run——
+    空 run 虽不可见，但会改变段落的 runs 结构（preserve_existing 等比对会受影响）。
+    段落完全没有 run 时（纯空段落）才新建 run。
+    """
+    runs = paragraph.runs
+    run = runs[-1] if runs else paragraph.add_run()
+    try:
+        run._r.append(drawing)
+    except AttributeError as e:  # python-docx 内部结构变动导致 _r 不可用
+        raise RuntimeError(
+            "无法将水印图形写入正文：python-docx 内部接口(_r)不可用，"
+            "可能是 python-docx 版本不兼容，请升级本工具或固定 python-docx 版本。"
+        ) from e
+
+
+def _iter_body_paragraphs(document):
+    """收集正文所有顶层段落，作为水印的锚点（保证“每一页都有水印”）。
+
+    仅取顶层正文段落（document.paragraphs）；表格单元格内的段落暂不纳入，
+    以避免表格密集文档被插入过量图形。常规文档每页至少含一个顶层段落，
+    因此水印即可覆盖每一页。空文档（无段落）由调用方补一个锚点段落。
+    """
+    seen = set()
+    paras = []
+    for p in document.paragraphs:
+        if p._p in seen:
+            continue
+        seen.add(p._p)
+        paras.append(p)
+    return paras
+
+
+def _remove_in_body(document):
+    """清除正文 body 里带本工具标记的水印块（replace 语义 / 旧版残留清理）。
+
+    只删带标记(MARK_*)的块，**绝不**碰用户正文内容；用户正文里的浮动图形
+    （即便 behindDoc=0）没有本工具标记，不会被误删。
+    """
+    root = document.part._element
+    for block in _top_graphic_blocks(root):
+        if _block_mark(block) is not None:
+            _detach_block(block)
+
+
 def _iter_marked_drawings(document):
-    """遍历文档（含页脚）里所有带本工具标记的图形。"""
+    """遍历文档（含页脚、正文 body）里所有带本工具标记的图形。"""
     for section in document.sections:
         for part in _iter_parts(document, section, include_footers=True):
             for drawing in part._element.iter(qn("w:drawing")):
                 if _mark_of(drawing) is not None:
                     yield drawing
+    # v1.6.2 起水印改放正文 body
+    for drawing in document.part._element.iter(qn("w:drawing")):
+        if _mark_of(drawing) is not None:
+            yield drawing
 
 
 def _has_watermark_in_doc(document) -> bool:
@@ -741,39 +807,55 @@ def insert_watermark(path: str, kinds, **opts) -> dict:
         layers.append((mark, bio.getvalue(), img.width, img.height, base, angle, scale,
                        offset_x, offset_y))
 
+    # ---- 水印写入正文层（v1.6.2 起）：浮于正文内容之上，覆盖正文图片 ----
+    # 旧版把水印放在页眉，而 Word 跨层绘制顺序固定为「先页眉后正文」，导致正文图片
+    # 永远盖住水印。要“水印显示在正文之上”，唯一可靠做法是把水印放进正文 body，并
+    # 设为 behindDoc="0"（浮于文字之上）。为保证「每一页都有水印」，把同一份浮动图形
+    # 锚定到正文的每一个段落（positionV/H 以页面为基准，故每个段落所在页都渲染出一份，
+    # 重叠成视觉上的一份）。识别/清除仍靠 docPr 上的私有标记，与层级无关。
     docpr_counter = 1
     inserted = 0
-    processed_parts = set()  # 全局按 part 去重，避免链接页眉被重复插入
+    main_part = document.part
+    # 先清除旧版（页眉/页脚）与正文里残留的本工具水印，保证 replace 语义
     for section in document.sections:
-        page_w = int(section.page_width)
-        page_h = int(section.page_height)
-        for part in _iter_parts(document, section, include_footers=redundant):
-            if part.part in processed_parts:
-                continue
-            processed_parts.add(part.part)
-            # 先清本 part 所有本工具水印（replace 语义：仅保留本次所选类型）
+        for part in _iter_parts(document, section, include_footers=True):
             _remove_in_part(part)
-            for (mark, png, nat_w, nat_h, base, angle, scale, offset_x, offset_y) in layers:
-                # 同一份 PNG 在同一 part 内会被复用（按内容哈希去重），平铺不会撑大文件
-                rId, img_part = part.part.get_or_add_image(BytesIO(png))
-                if tile:
-                    boxes = tile_layout(page_w, page_h, nat_w, nat_h,
-                                        tile_rows, tile_cols, scale, offset_x, offset_y)
-                else:
-                    disp_w = page_w * base * scale
-                    disp_h = disp_w * nat_h / nat_w if nat_w else disp_w
-                    # 居中基准 + 百分比偏移；offset 正=右/下，负=左/上
-                    boxes = [(page_w / 2.0 - disp_w / 2.0 + offset_x / 100.0 * page_w,
-                              page_h / 2.0 - disp_h / 2.0 + offset_y / 100.0 * page_h,
-                              disp_w, disp_h)]
-                for (pos_x, pos_y, disp_w, disp_h) in boxes:
-                    # 加固时用伪装显示名，私有标记放 descr（不影响本工具识别/清除）
-                    disp_name = decoy_name(docpr_counter) if redundant else mark
-                    drawing = _make_drawing(rId, int(disp_w), int(disp_h), angle,
-                                            disp_name, mark, docpr_counter, pos_x, pos_y)
-                    docpr_counter += 1
-                    _add_drawing_to_part(part, drawing)
-                    inserted += 1
+    _remove_in_body(document)
+
+    page_w = int(document.sections[0].page_width)
+    page_h = int(document.sections[0].page_height)
+    body_paras = _iter_body_paragraphs(document)
+    if not body_paras:
+        # 极端情况：文档没有任何正文段落，补一个空段落作为锚点
+        body_paras = [document.add_paragraph()]
+
+    # 预计算每层的图片关系与布局盒（rId 在同一 main_part 内按内容去重，平铺不撑大文件）
+    layer_layouts = []
+    for (mark, png, nat_w, nat_h, base, angle, scale, offset_x, offset_y) in layers:
+        rId, _img_part = main_part.get_or_add_image(BytesIO(png))
+        if tile:
+            boxes = tile_layout(page_w, page_h, nat_w, nat_h,
+                                tile_rows, tile_cols, scale, offset_x, offset_y)
+        else:
+            disp_w = page_w * base * scale
+            disp_h = disp_w * nat_h / nat_w if nat_w else disp_w
+            # 居中基准 + 百分比偏移；offset 正=右/下，负=左/上
+            boxes = [(page_w / 2.0 - disp_w / 2.0 + offset_x / 100.0 * page_w,
+                      page_h / 2.0 - disp_h / 2.0 + offset_y / 100.0 * page_h,
+                      disp_w, disp_h)]
+        layer_layouts.append((mark, rId, angle, boxes))
+
+    for p in body_paras:
+        for (mark, rId, angle, boxes) in layer_layouts:
+            for (pos_x, pos_y, disp_w, disp_h) in boxes:
+                # 加固时用伪装显示名，私有标记放 descr（不影响本工具识别/清除）
+                disp_name = decoy_name(docpr_counter) if redundant else mark
+                drawing = _make_drawing(rId, int(disp_w), int(disp_h), angle,
+                                        disp_name, mark, docpr_counter, pos_x, pos_y,
+                                        behind="0")
+                docpr_counter += 1
+                _add_drawing_to_paragraph(p, drawing)
+                inserted += 1
 
     document.save(path)
     return {"ok": True, "engine": "docx", "inserted": inserted, "kinds": kinds,
@@ -799,6 +881,15 @@ def detect_watermark_types(path: str) -> set:
                     found.add("image")
                 if found == {"text", "image"}:
                     return found
+    # v1.6.2 起水印改放正文 body，必须一并扫描
+    for drawing in document.part._element.iter(qn("w:drawing")):
+        mark = _mark_of(drawing)
+        if mark == MARK_TEXT:
+            found.add("text")
+        elif mark == MARK_IMG:
+            found.add("image")
+        if found == {"text", "image"}:
+            return found
     return found
 
 
@@ -860,6 +951,18 @@ def clear_watermark(path: str, kinds: list = None) -> dict:
                 elif mark is not None or _is_native_wm_block(block):
                     _detach_block(block)
                     removed += 1
+    # 正文 body：只清带本工具标记的水印块，**绝不**删除用户正文内容
+    # （含用户自己的浮动图，即便 behindDoc=0，没有本工具标记就不会被碰）。
+    # 原生/疑似水印的启发式判定仍只覆盖页眉/页脚，避免误删用户正文里的图形。
+    for block in _top_graphic_blocks(document.part._element):
+        mark = _block_mark(block)
+        if only_kinds:
+            if mark in kind_marks:
+                _detach_block(block)
+                removed += 1
+        elif mark is not None:
+            _detach_block(block)
+            removed += 1
     document.save(path)
     return {"ok": True, "engine": "docx", "removed": removed, "kinds": sorted(kinds)}
 

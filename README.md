@@ -5,13 +5,13 @@
 WriteMark 是一个 Windows 桌面小工具，用来给 **Word 文档**和**视频**加水印、去水印：
 
 - 图形界面（Python + PySide6），无需打开 Word 即可**实时预览**效果；
-- Word 侧以标准 OOXML 方式把水印写进页眉/页脚（衬于文字下方的图形），WPS 与 Microsoft Word 都能正常显示；
+- Word 侧以标准 OOXML 方式把水印写进**正文层、浮于文字与图片之上**（`behindDoc=0` + 最大 `relativeHeight`），正文图片不再遮挡水印，WPS 与 Microsoft Word 都能正常显示；
 - 视频侧对**每一帧**做合成，而不是只改封面，因此极难被抹掉；
 - 已打包为单个 `WordWatermark.exe`，双击即用，不需要安装 Python。
 
-当前版本 **v1.6.1**。下载地址：
+当前版本 **v1.6.2**。下载地址：
 [Releases 页面](https://github.com/jaymikly68/WriteMark/releases) →
-[WordWatermark.exe](https://github.com/jaymikly68/WriteMark/releases/download/v1.6.1/WordWatermark.exe)（124.7 MB）。
+[WordWatermark.exe](https://github.com/jaymikly68/WriteMark/releases/download/v1.6.2/WordWatermark.exe)（约 125 MB）。
 
 > 开发过程记录、逐版改动与版本历史见 **[Log/开发日志.md](Log/开发日志.md)**。
 
@@ -70,6 +70,6 @@ WriteMark 是一个 Windows 桌面小工具，用来给 **Word 文档**和**视�
 - **视频逐帧重编码**：长视频耗时较长属正常代价；画质由导出设置决定，不会优于源片。
 - **清除范围有安全边界**：WriteMark **默认只删除自己能识别、确认属于自己插入的水印**。若未检测到 WriteMark 水印，但发现疑似 Word 原生 / 用户自制的水印候选，程序会**先弹窗征求确认**（默认「否」）；你选择否或取消，则**不删除任何内容**。检测失败时同样直接取消本次清除，不会退化成扩大删除范围。
 - **原生水印识别属于启发式判断**：它按「衬于文字下方、负 z-index、VML textpath」等特征推测，不能 100% 区分所有用户图形与水印，请勿期待它替代人工判断。
-- **水印会被不透明的正文图片挡住**：水印写在页眉层、衬于文字下方（`behindDoc=1`），Word 先画页眉后画正文，因此正文里的图片会盖在水印之上——这与 Word 自带「水印」的表现一致，属 Word 的绘制顺序，不是本工具的缺陷。若确实需要水印压在图片之上，需改为浮于文字上方，但那样水印也会压住正文文字。
+- **水印显示层次（已优化）**：自 v1.6.2 起，水印改为写入**正文层并浮于内容之上**（`behindDoc=0` + 最大 `relativeHeight`），正文里的图片不再遮挡水印；水印仍保留私有标记，一键清除只删 WriteMark 自己插入的部分，不会碰用户正文或用户自制图形。早期版本（≤v1.6.1）水印落在页眉层（`behindDoc=1`），会被正文图片盖住，属 Word「先画页眉后画正文」的绘制顺序。
 - 历史版本曾提供「后台守护（水印被删自动补回）」，**该功能已在当前版本移除**；关闭窗口即退出程序。
 - 自动化测试：`pytest -q`（用例数量随版本迭代变化，以实际输出为准；最近一次验证为 **169 passed, 3 xfailed**）。

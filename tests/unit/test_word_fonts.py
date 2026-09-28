@@ -135,7 +135,7 @@ def test_font_size_controls_size():
     # 纯 Python .docx 引擎：字号现在真实控制水印大小（font_size 越小，绘制宽度越小）
     from docx import Document
     from docx.oxml.ns import qn
-    from watermark_tool.engine_docx import _iter_headers, insert_watermark
+    from watermark_tool.engine_docx import insert_watermark
 
     import tempfile, os
     d = tempfile.mkdtemp()
@@ -148,14 +148,13 @@ def test_font_size_controls_size():
     insert_watermark(big, ["text"], text={"text": "机密", "font_size": 280, "color": (0, 0, 0)})
 
     def _max_cx(path):
+        # v1.6.2 起水印写在正文 body：扫描正文里的图形取最大宽度
         doc = Document(path)
         mx = 0
-        for section in doc.sections:
-            for header in _iter_headers(doc, section):
-                for drawing in header._element.iter(qn("w:drawing")):
-                    ext = drawing.find(".//" + qn("wp:extent"))
-                    if ext is not None:
-                        mx = max(mx, int(ext.get("cx")))
+        for drawing in doc.element.body.iter(qn("w:drawing")):
+            ext = drawing.find(".//" + qn("wp:extent"))
+            if ext is not None:
+                mx = max(mx, int(ext.get("cx")))
         return mx
 
     cx_small = _max_cx(small)
