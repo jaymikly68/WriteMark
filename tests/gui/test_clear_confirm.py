@@ -3,7 +3,8 @@
 - 无 WriteMark 水印、但有原生水印 -> 必须弹窗确认，用户拒绝则完全不执行清除；
 - 用户确认后才执行（kinds=None 走全清，含原生水印）；
 - 既无工具水印也无原生水印 -> 告知无内容可清，不执行；
-- 有本工具水印 -> 按类型精确清除，不触发原生确认。
+- 有本工具水印 -> 按类型精确清除，不触发原生确认；
+  （v1.6.3 起）若同时存在 Word/用户水印，会先走「四选一冲突框」`_ask_clear_conflict`。
 """
 from __future__ import annotations
 
@@ -71,12 +72,20 @@ def test_no_watermark_at_all_informs_and_skips(app, monkeypatch):
 
 
 def test_tool_watermark_no_native_prompt(app, monkeypatch):
+    """有本工具水印时不应弹出「仅清原生水印」那个守门框（_ask_clear_native）。
+
+    v1.6.3 起的新行为：本工具水印 与 Word/用户水印**同时存在**时，会先弹出
+    「四选一冲突框」`_ask_clear_conflict`（本工具/用户/两者/取消）。
+    这条用例打桩选「仅清除本工具水印」——因为要断言的对象是**另一个**守门
+    `_ask_clear_native`（无工具水印时的全清确认）从未被调用。
+    不打桩的话 `QMessageBox.exec()` 会真的弹出模态框把测试挂住。
+    """
     w = App()
     w.file_path = _make_docx()
     w.out_edit.setText("")
     prompts = []
+    monkeypatch.setattr(w, "_ask_clear_conflict", lambda: "tool")
     ran, _ = _clear_with(w, monkeypatch, types={"text"}, native=True)
-    # 有工具水印时按类型精确清除，不应触发原生确认（_ask_clear_native 未被调用）
     assert ran is True
     # 再单独打桩 _ask_clear_native，重跑一次（types={'text'} 分支不会走到原生确认）
     monkeypatch.setattr(w, "_ask_clear_native", lambda: prompts.append(1) or True)
