@@ -9,9 +9,9 @@ WriteMark 是一个 Windows 桌面小工具，用来给 **Word 文档**和**视�
 - 视频侧对**每一帧**做合成，而不是只改封面，因此极难被抹掉；
 - 已打包为单个 `WordWatermark.exe`，双击即用，不需要安装 Python。
 
-当前版本 **v1.6.0**。下载地址：
+当前版本 **v1.6.1**。下载地址：
 [Releases 页面](https://github.com/jaymikly68/WriteMark/releases) →
-[WordWatermark.exe](https://github.com/jaymikly68/WriteMark/releases/download/v1.6.0/WordWatermark.exe)（124.7 MB）。
+[WordWatermark.exe](https://github.com/jaymikly68/WriteMark/releases/download/v1.6.1/WordWatermark.exe)（124.7 MB）。
 
 > 开发过程记录、逐版改动与版本历史见 **[Log/开发日志.md](Log/开发日志.md)**。
 
