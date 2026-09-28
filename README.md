@@ -9,9 +9,9 @@ WriteMark 是一个 Windows 桌面小工具，用来给 **Word 文档**和**视�
 - 视频侧对**每一帧**做合成，而不是只改封面，因此极难被抹掉；
 - 已打包为单个 `WordWatermark.exe`，双击即用，不需要安装 Python。
 
-当前版本 **v1.6.2**。下载地址：
+当前版本 **v1.6.3**。下载地址：
 [Releases 页面](https://github.com/jaymikly68/WriteMark/releases) →
-[WordWatermark.exe](https://github.com/jaymikly68/WriteMark/releases/download/v1.6.2/WordWatermark.exe)（约 125 MB）。
+[WordWatermark.exe](https://github.com/jaymikly68/WriteMark/releases/download/v1.6.3/WordWatermark.exe)（约 130 MB）。
 
 > 开发过程记录、逐版改动与版本历史见 **[Log/开发日志.md](Log/开发日志.md)**。
 
@@ -42,6 +42,7 @@ WriteMark 是一个 Windows 桌面小工具，用来给 **Word 文档**和**视�
 **清除水印**
 
 - 一键清除 WriteMark 自己插入的水印；同时有文字与图片时会让你选择删哪一种。
+- **本工具水印与「Word 自带 / 你自己添加的水印」共存时**：会弹出四选一框，让你明确选择——**仅清除本工具水印** / **仅清除 Word/用户水印** / **两者都清除** / **取消**。选择「仅清除 Word/用户水印」时，WriteMark 自己插入的水印会原样保留；选择「取消」则不动任何内容。
 
 ---
 

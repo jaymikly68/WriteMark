@@ -144,10 +144,13 @@ def insert_watermark(src_path: str, kinds, output_path: str = None,
     return res
 
 
-def clear_watermark(src_path: str, output_path: str = None, kinds: list = None) -> dict:
+def clear_watermark(src_path: str, output_path: str = None, kinds: list = None,
+                     clear_native_only: bool = False) -> dict:
     """
     清除水印。同样默认【不破坏原文件】：复制到 output_path 后在副本上清除。
     kinds 给定（'text'/'image'）时只清除指定类型（仅 .docx 生效，.doc 仍整文档清除）。
+    clear_native_only=True（仅 .docx 生效）时只清除 Word 原生/用户自制水印，
+    保留本工具添加的水印。
     """
     src_path = os.path.abspath(src_path)
     _ensure_not_locked(src_path)
@@ -165,7 +168,8 @@ def clear_watermark(src_path: str, output_path: str = None, kinds: list = None) 
         res = engine_com.clear_watermark(src_path, output_path=output_path)
     else:
         shutil.copy2(src_path, output_path)  # 保留原文件，在新副本上清除水印
-        res = engine_docx.clear_watermark(output_path, kinds=kinds)
+        res = engine_docx.clear_watermark(output_path, kinds=kinds,
+                                         clear_native_only=clear_native_only)
     if isinstance(res, dict):
         res["output"] = output_path
     return res

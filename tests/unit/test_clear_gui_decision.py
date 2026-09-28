@@ -65,8 +65,10 @@ class _Recorder:
     def __init__(self):
         self.calls = []
 
-    def __call__(self, src_path, output_path=None, kinds=None, **kw):
-        self.calls.append({"src": src_path, "out": output_path, "kinds": kinds})
+    def __call__(self, src_path, output_path=None, kinds=None,
+                 clear_native_only=False, **kw):
+        self.calls.append({"src": src_path, "out": output_path, "kinds": kinds,
+                           "clear_native_only": clear_native_only})
         return {"ok": True, "engine": "docx", "removed": 0,
                 "kinds": sorted(kinds or [])}
 
@@ -155,6 +157,9 @@ def test_gui_only_text_watermark_clears_text_only(monkeypatch, app):
     fp, out = _build(tmp, "only_text", ["text"], with_user_behind=True)
 
     app, jobs = _stub_app(monkeypatch, fp, out)
+    # 文档同时含本工具文字水印 + 用户 behindDoc 图（被 detect_native 识别为原生水印），
+    # 走四选一冲突弹窗；用户选「仅清除本工具水印」-> kinds=['text']，不动用户图。
+    monkeypatch.setattr(gui_mod.App, "_ask_clear_conflict", lambda self: "tool")
     gui_mod.App._clear(app)
     calls = _apply(app, jobs, monkeypatch)
 
@@ -162,13 +167,15 @@ def test_gui_only_text_watermark_clears_text_only(monkeypatch, app):
     assert calls[0]["kinds"] == ["text"], (
         f"只有文字水印时应传 kinds=['text']，实际 {calls[0]['kinds']}——"
         "None 会走 clear_any，连带删掉用户自己的 behindDoc 图")
+    assert calls[0]["clear_native_only"] is False
 
     # 真的执行一遍，看最终文档
     core.clear_watermark(fp, output_path=out, kinds=["text"])
     assert engine_docx.detect_watermark_types(out) == set(), "文字水印应已清除"
     assert _user_behind_count(out) == 1, "用户自己的 behindDoc 图必须保留"
     assert USER_BODY in [p.text for p in Document(out).paragraphs]
-    print("[GUI] 只有文字水印 -> kinds=['text']；水印清除，用户 behindDoc 图保留")
+    print("[GUI] 文字水印+用户图（冲突弹窗选「仅工具」） -> kinds=['text']；"
+          "工具水印清除，用户 behindDoc 图保留")
 
 
 def test_gui_only_image_watermark_clears_image_only(monkeypatch, app):
@@ -177,17 +184,21 @@ def test_gui_only_image_watermark_clears_image_only(monkeypatch, app):
     fp, out = _build(tmp, "only_img", ["image"], with_user_behind=True)
 
     app, jobs = _stub_app(monkeypatch, fp, out)
+    # 同上：冲突弹窗选「仅清除本工具水印」-> kinds=['image']，不动用户图。
+    monkeypatch.setattr(gui_mod.App, "_ask_clear_conflict", lambda self: "tool")
     gui_mod.App._clear(app)
     calls = _apply(app, jobs, monkeypatch)
 
     assert len(calls) == 1
     assert calls[0]["kinds"] == ["image"], (
         f"只有图片水印时应传 kinds=['image']，实际 {calls[0]['kinds']}")
+    assert calls[0]["clear_native_only"] is False
 
     core.clear_watermark(fp, output_path=out, kinds=["image"])
     assert engine_docx.detect_watermark_types(out) == set(), "图片水印应已清除"
     assert _user_behind_count(out) == 1, "用户自己的 behindDoc 图必须保留"
-    print("[GUI] 只有图片水印 -> kinds=['image']；水印清除，用户 behindDoc 图保留")
+    print("[GUI] 图片水印+用户图（冲突弹窗选「仅工具」） -> kinds=['image']；"
+          "工具水印清除，用户 behindDoc 图保留")
 
 
 # ===========================================================================
@@ -345,18 +356,21 @@ def test_gui_dual_watermark_plus_user_native_spares_user_art(monkeypatch, app):
     assert _user_behind_count(fp) == 1, "前置：文档里应有 1 张用户自己的 behindDoc 图"
 
     app, jobs = _stub_app(monkeypatch, fp, out)
-    monkeypatch.setattr(gui_mod.App, "_ask_clear_choice", lambda self: "both")
+    # 四选一冲突弹窗里用户选「仅清除本工具水印」：应只删本工具两种水印，
+    # 用户的 behindDoc 图必须留着（marker 与用户内容始终可区分）。
+    monkeypatch.setattr(gui_mod.App, "_ask_clear_conflict", lambda self: "tool")
     gui_mod.App._clear(app)
     calls = _apply(app, jobs, monkeypatch)
 
-    assert len(calls) == 1 and calls[0]["kinds"] == ["text", "image"]
+    assert len(calls) == 1 and set(calls[0]["kinds"]) == {"text", "image"}
+    assert calls[0]["clear_native_only"] is False
 
     core.clear_watermark(fp, output_path=out, kinds=["text", "image"])
     assert engine_docx.detect_watermark_types(out) == set(), "两种 Watermark 水印都应清除"
     assert _user_behind_count(out) == 1, \
         "用户自己的 behindDoc 图必须保留——marker 与用户内容必须始终可区分"
     assert USER_BODY in [p.text for p in Document(out).paragraphs], "正文必须保留"
-    print("[GUI] 双水印+用户图：选“都去除” -> 只删本工具水印，用户图保留")
+    print("[GUI] 双水印+用户图（冲突弹窗选「仅工具」） -> 只删本工具水印，用户图保留")
 
 
 def test_gui_no_tool_watermark_but_native_requires_confirm(monkeypatch, app):
@@ -384,3 +398,103 @@ def test_gui_no_tool_watermark_but_native_requires_confirm(monkeypatch, app):
     assert len(calls) == 1 and calls[0]["kinds"] is None, (
         f"确认后应全清（kinds=None，含原生水印），实际 {calls}")
     print("[GUI] 无工具水印但有原生 -> 确认 -> 全清")
+
+
+# ===========================================================================
+# 新需求：本工具水印 与 用户 Word 原生水印 共存时的四选一冲突弹窗
+# ===========================================================================
+def test_gui_conflict_dialog_only_when_both_present(monkeypatch, app):
+    """仅含本工具水印、没有原生水印时，不应弹四选一冲突框（走原有按类型逻辑）。"""
+    tmp = tempfile.mkdtemp()
+    fp, out = _build(tmp, "tool_only", ["text"], with_user_behind=False)
+    assert engine_docx.detect_native_watermark(fp) is False, "前置：不应有原生水印"
+
+    asked = []
+    monkeypatch.setattr(gui_mod.App, "_ask_clear_conflict",
+                        lambda self: asked.append(True) or "tool")
+    app, jobs = _stub_app(monkeypatch, fp, out)
+    gui_mod.App._clear(app)
+    _apply(app, jobs, monkeypatch)
+    assert asked == [], "无原生水印时不应弹四选一冲突框"
+
+
+@pytest.mark.parametrize("choice,expected_kinds,expected_native", [
+    ("tool", ["text"], False),
+    ("native", None, True),
+    ("both", None, False),
+])
+def test_gui_conflict_dialog_maps_choice(monkeypatch, app, choice, expected_kinds, expected_native):
+    """四选一：用户选什么，就传对应的 (kinds, clear_native_only)。"""
+    tmp = tempfile.mkdtemp()
+    fp, out = _build(tmp, "conflict", ["text"], with_user_behind=True)
+    assert engine_docx.detect_native_watermark(fp) is True, "前置：应有原生水印"
+
+    app, jobs = _stub_app(monkeypatch, fp, out)
+    monkeypatch.setattr(gui_mod.App, "_ask_clear_conflict", lambda self: choice)
+    gui_mod.App._clear(app)
+    calls = _apply(app, jobs, monkeypatch)
+
+    assert len(calls) == 1, f"应恰好一次清除，实际 {len(calls)}"
+    assert calls[0]["kinds"] == expected_kinds, (
+        f"选 {choice} 应传 kinds={expected_kinds}，实际 {calls[0]['kinds']}")
+    assert calls[0]["clear_native_only"] is expected_native, (
+        f"选 {choice} 应传 clear_native_only={expected_native}，"
+        f"实际 {calls[0]['clear_native_only']}")
+    print(f"[GUI] 冲突弹窗选 {choice} -> kinds={expected_kinds}, "
+          f"native_only={expected_native}")
+
+
+def test_gui_conflict_dialog_cancel_does_nothing(monkeypatch, app):
+    """用户点「取消」：一次清除都不许发生。"""
+    tmp = tempfile.mkdtemp()
+    fp, out = _build(tmp, "conflict_cancel", ["text", "image"], with_user_behind=True)
+    app, jobs = _stub_app(monkeypatch, fp, out)
+    monkeypatch.setattr(gui_mod.App, "_ask_clear_conflict", lambda self: None)
+    gui_mod.App._clear(app)
+    assert jobs == [], "用户取消时不应排队任何清除任务"
+    assert not os.path.exists(out), "用户取消时不该产生输出文件"
+    print("[GUI] 冲突弹窗点取消 -> 不发起任何清除")
+
+
+def test_gui_conflict_native_choice_removes_user_keeps_tool(monkeypatch, app):
+    """选「仅清除 Word/用户水印」：用户的 behindDoc 图被删，本工具文字水印保留。"""
+    tmp = tempfile.mkdtemp()
+    fp, out = _build(tmp, "conflict_native", ["text"], with_user_behind=True)
+    assert _user_behind_count(fp) == 1, "前置：1 张用户 behindDoc 图"
+    assert engine_docx.detect_watermark_types(fp) == {"text"}, "前置：1 个本工具文字水印"
+
+    app, jobs = _stub_app(monkeypatch, fp, out)
+    monkeypatch.setattr(gui_mod.App, "_ask_clear_conflict", lambda self: "native")
+    gui_mod.App._clear(app)
+    calls = _apply(app, jobs, monkeypatch)
+
+    # 真的执行一遍：用捕获到的参数跑真实清除
+    c = calls[0]
+    core.clear_watermark(fp, output_path=out, kinds=c["kinds"],
+                         clear_native_only=c["clear_native_only"])
+    assert _user_behind_count(out) == 0, "用户的 behindDoc 图应被清除"
+    assert engine_docx.detect_watermark_types(out) == {"text"}, \
+        "本工具文字水印必须保留（只删了用户水印）"
+    assert USER_BODY in [p.text for p in Document(out).paragraphs]
+    print("[GUI] 冲突选「仅用户水印」 -> 用户图删掉、本工具文字水印保留")
+
+
+def test_gui_conflict_both_choice_removes_everything(monkeypatch, app):
+    """选「两者都清除」：本工具水印与用户 behindDoc 图一并删除。"""
+    tmp = tempfile.mkdtemp()
+    fp, out = _build(tmp, "conflict_both", ["text", "image"], with_user_behind=True)
+    assert _user_behind_count(fp) == 1
+    assert engine_docx.detect_watermark_types(fp) == {"text", "image"}
+
+    app, jobs = _stub_app(monkeypatch, fp, out)
+    monkeypatch.setattr(gui_mod.App, "_ask_clear_conflict", lambda self: "both")
+    gui_mod.App._clear(app)
+    calls = _apply(app, jobs, monkeypatch)
+
+    c = calls[0]
+    core.clear_watermark(fp, output_path=out, kinds=c["kinds"],
+                         clear_native_only=c["clear_native_only"])
+    assert engine_docx.detect_watermark_types(out) == set(), "本工具水印应清除"
+    assert _user_behind_count(out) == 0, "用户 behindDoc 图应清除"
+    assert USER_BODY in [p.text for p in Document(out).paragraphs]
+    print("[GUI] 冲突选「两者都清除」 -> 本工具水印与用户图均删掉")

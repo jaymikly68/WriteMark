@@ -913,14 +913,19 @@ def detect_native_watermark(path: str) -> bool:
     return False
 
 
-def clear_watermark(path: str, kinds: list = None) -> dict:
+def clear_watermark(path: str, kinds: list = None,
+                    clear_native_only: bool = False) -> dict:
     """清除 .docx 中的水印。
 
-    - kinds 为 None：清掉本工具添加的，以及 Word 原生的（衬于文字下方的图形）。
-      既能清掉本工具留下的文本/图像水印，也能清掉原本就带水印的 Word 文档。
+    - kinds 为 None 且 clear_native_only=False：清掉本工具添加的，以及 Word 原生的
+      （衬于文字下方的图形）。既能清掉本工具留下的文本/图像水印，也能清掉原本就带
+      水印的 Word 文档。
     - kinds 给定（包含 'text' / 'image'）：只删带对应标记的水印，保留其它类型，
       且**不**动 Word 原生的 behindDoc 图形（避免“只去文字、保留图片”时被误删）。
       例如 kinds=['text'] 仅去除文字水印、图片水印原样保留。
+    - clear_native_only=True：只删「Word 原生/用户自制水印」，保留本工具添加的
+      水印（按私有标记识别）。用于「文档同时含本工具水印与用户水印时，用户选择只删
+      用户水印」的场景——绝对不会误删本工具自己写的那份。
     """
     document = Document(path)
     kinds = set(kinds or [])
@@ -943,7 +948,12 @@ def clear_watermark(path: str, kinds: list = None) -> dict:
             # 但按块删可同时清掉可能存在的 Fallback 编码，行为更干净统一
             for block in _top_graphic_blocks(part._element):
                 mark = _block_mark(block)
-                if only_kinds:
+                if clear_native_only:
+                    # 只删原生/用户自制水印，保留带本工具标记的水印
+                    if mark is None and _is_native_wm_block(block):
+                        _detach_block(block)
+                        removed += 1
+                elif only_kinds:
                     # 仅按类型删除：只删 mark 命中 kinds 的块，绝不碰原生水印
                     if mark in kind_marks:
                         _detach_block(block)
@@ -954,17 +964,21 @@ def clear_watermark(path: str, kinds: list = None) -> dict:
     # 正文 body：只清带本工具标记的水印块，**绝不**删除用户正文内容
     # （含用户自己的浮动图，即便 behindDoc=0，没有本工具标记就不会被碰）。
     # 原生/疑似水印的启发式判定仍只覆盖页眉/页脚，避免误删用户正文里的图形。
-    for block in _top_graphic_blocks(document.part._element):
-        mark = _block_mark(block)
-        if only_kinds:
-            if mark in kind_marks:
+    # clear_native_only 时跳过正文：本工具的水印就写在正文 body 里，绝不能误删；
+    # 而原生水印只存在于页眉/页脚，正文里没有，跳过不影响清理效果。
+    if not clear_native_only:
+        for block in _top_graphic_blocks(document.part._element):
+            mark = _block_mark(block)
+            if only_kinds:
+                if mark in kind_marks:
+                    _detach_block(block)
+                    removed += 1
+            elif mark is not None:
                 _detach_block(block)
                 removed += 1
-        elif mark is not None:
-            _detach_block(block)
-            removed += 1
     document.save(path)
-    return {"ok": True, "engine": "docx", "removed": removed, "kinds": sorted(kinds)}
+    return {"ok": True, "engine": "docx", "removed": removed,
+            "kinds": sorted(kinds), "native_only": clear_native_only}
 
 
 def has_watermark(path: str) -> bool:

@@ -3096,6 +3096,7 @@ class App(QMainWindow):
             out = core.default_output_path(self.file_path)
             self.out_edit.setText(out)
         kinds = None
+        clear_native_only = False
         # —— 清除范围的安全守门 ——
         # 本工具只认识带私有标记(MARK_TEXT/MARK_IMG)的水印；Word 原生水印（衬于文字下方的
         # 图片）不携带标记，全清(clear_any)会一并删掉。为避免误删用户自己的原生水印，分情况处理：
@@ -3135,8 +3136,32 @@ class App(QMainWindow):
                 "水印检测失败，为避免误删内容，已取消本次清除。\n\n"
                 f"错误：{type(e).__name__}: {e}")
             return
+        # 本工具水印 与 「Word 原生/用户自制水印」共存：四选一弹窗
+        # （需求：同时存在时让用户明确选择删哪一类，而不是无脑全清）。
+        if types:
+            try:
+                has_native = engine_docx.detect_native_watermark(self.file_path)
+            except Exception:
+                has_native = False
+            if has_native:
+                choice = self._ask_clear_conflict()
+                if choice is None:        # 用户点了“取消”
+                    return
+                if choice == "tool":      # 仅删本工具水印（按类型精确）
+                    kinds = [k for k in ("text", "image") if k in types]
+                    clear_native_only = False
+                elif choice == "native":  # 仅删用户 Word 水印，保留本工具的
+                    kinds = None
+                    clear_native_only = True
+                else:                     # "both"：两者一起删
+                    kinds = None
+                    clear_native_only = False
+                self._run(lambda: core.clear_watermark(
+                    self.file_path, output_path=out,
+                    kinds=kinds, clear_native_only=clear_native_only))
+                return
         if types == {"text", "image"}:
-            # 同时含两类水印：弹窗让用户逐项选择（行为与之前一致）
+            # 同时含两类本工具水印（无原生）：弹窗让用户逐项选择（行为不变）
             choice = self._ask_clear_choice()
             if choice is None:        # 用户点了“取消”
                 return
@@ -3191,6 +3216,33 @@ class App(QMainWindow):
             return "text"
         if clicked is btn_img:
             return "image"
+        if clicked is btn_both:
+            return "both"
+        return None
+
+    def _ask_clear_conflict(self):
+        """文档同时含「本工具水印」与「Word 原生/用户自制水印」时弹出四选一框。
+
+        返回 'tool'（仅删本工具水印）/ 'native'（仅删用户 Word 水印）/
+        'both'（两者都删）/ None（取消）。
+        """
+        box = QMessageBox(self)
+        box.setWindowTitle("清除水印")
+        box.setIcon(QMessageBox.Question)
+        box.setText(
+            "该文档同时含有「本工具添加的水印」和「Word 自带（或您自己添加）的水印」。\n"
+            "请选择要清除的对象：")
+        btn_tool = box.addButton("仅清除本工具水印", QMessageBox.ActionRole)
+        btn_native = box.addButton("仅清除 Word/用户水印", QMessageBox.ActionRole)
+        btn_both = box.addButton("两者都清除", QMessageBox.ActionRole)
+        box.addButton("取消", QMessageBox.RejectRole)
+        box.setDefaultButton(btn_both)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is btn_tool:
+            return "tool"
+        if clicked is btn_native:
+            return "native"
         if clicked is btn_both:
             return "both"
         return None
