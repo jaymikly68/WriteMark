@@ -343,16 +343,15 @@ def test_mixed_baseline_alignment():
 
 def test_close_event_no_error():
     # closeEvent 在打桩 os._exit 下不应抛异常（验证线程清理逻辑健壮）。
-    # 默认关闭行为是「最小化到后台」，不走强退路径；用 WM_CLOSE_CHOICE=quit
-    # 才能覆盖到「停守护 + 兜底计时线程」这段代码（与自动化退出同一条路径）。
+    # 守护/watchdog 移除后「关闭窗口 = 退出程序」是唯一路径，不再需要注入
+    # WM_CLOSE_CHOICE 去选分支；直接调用 closeEvent 就走到真实的退出代码：
+    # 清理所有 worker 线程 + 启动 6s 兜底计时线程。
     import os as _os
     import threading as _th
     from PySide6.QtWidgets import QApplication
     from PySide6.QtGui import QCloseEvent
     real_exit = _os._exit
     _os._exit = lambda code: None  # 防止测试进程被真正杀掉
-    _saved_choice = _os.environ.get("WM_CLOSE_CHOICE")
-    _os.environ["WM_CLOSE_CHOICE"] = "quit"
     try:
         app = QApplication.instance() or QApplication([])
         from watermark_tool.gui import App
@@ -360,13 +359,9 @@ def test_close_event_no_error():
         win.closeEvent(QCloseEvent())
         # 确认兜底计时线程已启动（daemon）
         daemons = [t for t in _th.enumerate() if t.daemon and t.is_alive()]
-        assert any(True for _ in daemons), "应有守护兜底计时线程在运行"
+        assert any(True for _ in daemons), "应有兜底计时线程在运行"
     finally:
         _os._exit = real_exit
-        if _saved_choice is None:
-            _os.environ.pop("WM_CLOSE_CHOICE", None)
-        else:
-            _os.environ["WM_CLOSE_CHOICE"] = _saved_choice
     print("[gui] closeEvent 线程清理 + 兜底强退计时线程 启动正常")
 
 

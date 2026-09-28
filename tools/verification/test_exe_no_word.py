@@ -45,9 +45,7 @@ def main():
 
     w = Watcher()
     w.start()
-    env = os.environ.copy()
-    env["WM_CLOSE_CHOICE"] = "quit"     # 自动化测试：直走退出分支
-    p = subprocess.Popen([EXE], cwd=os.getcwd(), env=env)
+    p = subprocess.Popen([EXE], cwd=os.getcwd())
     try:
         import win32con
         import win32gui
