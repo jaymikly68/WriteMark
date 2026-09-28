@@ -1,7 +1,7 @@
 """端到端验证交付形态（单个 WordWatermark.exe）：
 
 1) 首次运行会把内嵌运行体解压到 %LOCALAPPDATA%\\WriteMark\\runtime\\<版本>（带进度提示窗）
-2) 点关闭时弹选择；用 WM_CLOSE_CHOICE 环境变量可模拟“选退出程序/最小化”
+2) **点关闭 = 退出程序**（守护/watchdog 已移除，不再有「最小化到后台」的选择）
 3) **关闭 → 进程结束**必须接近瞬时（用户感知的卡顿就在这一段：
    老 onefile 形态要 8.7s~30s，因为它要删除 130MB 的临时解包目录）
 4) 启动器进程自身应很快退场，且退出后不留下任何本程序进程
@@ -83,16 +83,14 @@ def wait_for(cond, timeout=240, interval=0.05):
     return None, time.time() - t0
 
 
-def run_once(exe, first_run, choice="quit"):
+def run_once(exe, first_run):
     import win32con
     import win32gui
     tag = "首次" if first_run else "再次"
-    print(f"\n=== {tag}运行（关闭时选择：{'退出程序' if choice == 'quit' else '最小化到后台'}）===")
+    print(f"\n=== {tag}运行（关闭 → 退出）===")
 
-    env = os.environ.copy()
-    env["WM_CLOSE_CHOICE"] = choice      # 免去自动化脚本去点模态框
     t0 = time.time()
-    launcher = subprocess.Popen([exe], cwd=os.path.dirname(exe), env=env)
+    launcher = subprocess.Popen([exe], cwd=os.path.dirname(exe))
 
     hwnd, dt = wait_for(find_window, timeout=240)
     print(f"双击 exe → 窗口出现：{dt:.2f}s")
@@ -114,8 +112,7 @@ def run_once(exe, first_run, choice="quit"):
     print(f"当前本程序进程：{[(p, k) for p, _, k in procs]}")
     assert apps, "找不到运行体进程"
 
-    # 关闭窗口 = 退出程序（水印守护移除后不再后台驻留/最小化到托盘）
-    t_close = time.time()
+    # 关闭窗口 = 退出程序（水印守护移除后不再后台驻留/最小化到托盘，也没有选择框要处理）
     win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
     gone, dt_close = wait_for(lambda: not [p for p in app_pids() if p[2] == "app"],
                               timeout=30, interval=0.02)
@@ -153,8 +150,8 @@ def main():
 
     first = not os.path.isdir(os.path.join(runtime_root(), VERSION))
     results = [
-        run_once(exe, first, "quit"),        # 首次（含解压）→ 关窗即退出
-        run_once(exe, False, "quit"),        # 二次 → 关窗即退出
+        run_once(exe, first),       # 首次（含解压）→ 关窗即退出
+        run_once(exe, False),       # 二次 → 关窗即退出
     ]
 
     runtime_path = os.path.join(runtime_root(), VERSION, APP_EXE_NAME)
