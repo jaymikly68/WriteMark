@@ -22,8 +22,19 @@
 
 ## 验证
 
-- 全量单测：`132 passed / 3 xfailed / 0 failed`（含新增的冲突弹窗与 native_only 测试）。
-- `tests/unit` 全绿。
+在最终提交（tag `v1.6.3` 所指的那次）上执行全量 `pytest -q`：
+
+- **全量**：`181 passed / 3 xfailed / 0 failed`（63.5s）。
+- `tests/unit`：`132 passed / 3 xfailed`（含新增的 native_only 与四选一决策测试）。
+- `tests/gui`：`47 passed`（含 GUI 侧弹窗决策的适配）。
+- `tests/integration`：`2 passed`。
+
+3 条 `xfail` 为刻意保留的已知风险/技术债刻画（见 `tests/unit/test_clear_any_scope.py`
+与 `tests/unit/test_ttc_index.py`），不是回归缺陷。
+
+另已用独立脚本（非 repo 自动化用例）复验底层删除语义，全部通过：
+`clear_native_only=True` 只删原生、本工具水印与用户正文/图片零改动；
+`kinds=['text']` 不碰原生水印与用户正文图片；全清同样保留用户正文文字与图片。
 
 ## 下载
 
